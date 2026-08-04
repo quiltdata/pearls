@@ -1,0 +1,29 @@
+=== Trial B / Variant b ===
+--- reset main and feature to C0 (jomeio4x95rlw5e2nuaawgp1qepuvwv) ---
+{"@type":"api:ResetResponse","api:status":"api:success"}
+{"@type":"api:ResetResponse","api:status":"api:success"}
+--- PUT main: price=12.99 stock=5 ---
+["terminusdb:///data/Product/Widget" ]
+
+--- PUT feature: price=14.99 stock=5 ---
+["terminusdb:///data/Product/Widget" ]
+
+main_tip=lz1uwshh3gjtpdo9ueyetph17e9xdxv
+feature_tip=wmxp2txenrwycko1wfvv02ojs4pimp9
+before_commit variant (b) = 'lz1uwshh3gjtpdo9ueyetph17e9xdxv'
+--- POST /api/apply/admin/spike/local/branch/main ---
+REQUEST BODY: {"before_commit":"lz1uwshh3gjtpdo9ueyetph17e9xdxv","after_commit":"wmxp2txenrwycko1wfvv02ojs4pimp9","commit_info":{"author":"spike","message":"apply-B_b"},"type":"instance"}
+{"@type":"api:ApplyResponse","api:status":"api:success"}
+HTTP_STATUS:200
+---headers---
+HTTP/1.1 200 OK
+Date: Tue, 04 Aug 2026 23:21:13 GMT
+Connection: Keep-Alive
+Content-Type: application/json; charset=UTF-8
+Content-Length: 56
+
+
+--- read back main/Product/Widget ---
+{"@id":"Product/Widget","@type":"Product","name":"Widget","price":14.99,"stock":5}
+
+=== end B_b ===

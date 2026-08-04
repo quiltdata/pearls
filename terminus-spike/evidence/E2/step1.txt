@@ -1,0 +1,11 @@
+=== Step 1: write with header V0 (fresh) ===
+HTTP/1.1 200 OK
+Date: Tue, 04 Aug 2026 23:21:53 GMT
+Connection: Keep-Alive
+Terminusdb-Data-Version: branch:cn2a3wyayvusfholgui8fsermlehe9a
+Content-Type: application/json; charset=UTF-8
+Content-Length: 39
+
+["terminusdb:///data/Product/Widget" ]
+
+HTTP_STATUS:200

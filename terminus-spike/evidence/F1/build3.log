@@ -1,0 +1,18 @@
+rm src/rust/target/release/libterminusdb_dylib.dylib || true
+rm src/rust/librust.* || true
+rm src/rust/librust.* || true
+rm: src/rust/librust.*: No such file or directory
+cd src/rust && cargo build --no-default-features --profile release
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.13s
+cp src/rust/target/release/libterminusdb_dylib.dylib src/rust/librust.dylib
+Building development binary (no library stripping)...
+LANG=C.UTF-8 swipl \
+	  --on-error=halt \
+	  --on-warning=halt \
+	  --quiet \
+	  -O \
+	  -t 'main, halt' \
+	  -f src/bootstrap_dev.pl
+Development binary 'terminusdb' created successfully
+Run with: ./terminusdb help
+make dev  1.13s user 0.31s system 46% cpu 3.137 total

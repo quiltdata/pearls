@@ -1,0 +1,3 @@
+=== grant capability (attempt 1: scope=database) ===
+{"api:message":"Unexpected failure in request handler","api:status":"api:failure"}
+HTTP_STATUS:500

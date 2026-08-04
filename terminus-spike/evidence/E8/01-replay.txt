@@ -1,0 +1,11 @@
+=== write #1 ===
+["terminusdb:///data/Product/Widget" ]
+
+HTTP_STATUS:200
+=== write #2 (byte-identical request) ===
+["terminusdb:///data/Product/Widget" ]
+
+HTTP_STATUS:200
+=== log (top 3) ===
+[ {"@id":"ValidCommit/ymmg1yojm1ghe983vfxauprorknq8vc","@type":"ValidCommit","author":"spike","identifier":"ymmg1yojm1ghe983vfxauprorknq8vc","instance":"layer_data:Layer_a77c5bd2a50d524d4277e964d493f6ae16253da889022cee8663669c440ceac1","message":"e8-replay-test","parent":"ValidCommit/2j7rbzbud1ijh86eqtzp8s3ejxz09cr","schema":"layer_data:Layer_91f050cbd4905b68dba3c2d8d9623790ac7e844c9dd95d26937d86fe45745272","timestamp":1785886068.46716162193032552827,"user":"terminusdb://system/data/User/admin"},  {"@id":"ValidCommit/2j7rbzbud1ijh86eqtzp8s3ejxz09cr","@type":"ValidCommit","author":"spike","identifier":"2j7rbzbud1ijh86eqtzp8s3ejxz09cr","instance":"layer_data:Layer_0941d1aaeb6cfb3535c2efc984d8cac10f86cbba011bac6ec3c5ea616dbe73b2","message":"e7-provenance-real","parent":"ValidCommit/r9guzsnfn0rmab2b37ep6et2pwl8u9r","schema":"layer_data:Layer_91f050cbd4905b68dba3c2d8d9623790ac7e844c9dd95d26937d86fe45745272","timestamp":1785886059.33938339134758826455,"user":"terminusdb://system/data/User/admin"},  {"@id":"ValidCommit/r9guzsnfn0rmab2b37ep6et2pwl8u9r","@type":"ValidCommit","author":"spike","identifier":"r9guzsnfn0rmab2b37ep6et2pwl8u9r","instance":"layer_data:Layer_1decb43a26d5e3f1d914cf6bbfea1fa853b1812169b47294f07a9c5d5f895afb","message":"e6-commit1","parent":"ValidCommit/i3e3e9w8ivuqeepvly1qujinaohbneo","schema":"layer_data:Layer_91f050cbd4905b68dba3c2d8d9623790ac7e844c9dd95d26937d86fe45745272","timestamp":1785886027.26023102310231023102,"user":"terminusdb://system/data/User/admin"} ]
+HTTP_STATUS:200

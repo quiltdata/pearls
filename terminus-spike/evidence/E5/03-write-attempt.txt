@@ -1,0 +1,4 @@
+=== e5_user attempts write to spike db ===
+["terminusdb:///data/Product/Widget" ]
+
+HTTP_STATUS:200
