@@ -160,9 +160,17 @@ commit_write_access, schema_read_access, class_frame, branch` was granted to a f
 role/user/grant setup in `01-create-role.txt`, `02-create-user.txt`, `03-grant-capability-attempt2.txt`.
 Notable: the first grant attempt (`03-grant-capability-attempt1.txt`) failed with a raw
 `api:message":"Unexpected failure in request handler"` (HTTP 500) when `scope`/`user`/`roles`
-were passed as plain org/db path strings — the endpoint requires full `terminusdb://system/data/...`
-URIs, not the `org/db` shorthand used elsewhere in the API. That inconsistency is itself worth
-flagging (see "documentation got wrong" below).
+were passed as plain org/db path strings with no `scope_type` field.
+
+**Correction (post-hoc):** this spike originally flagged that failure as an undocumented
+inconsistency. It is not. `terminusdb-docs-static`'s `capabilities-api-modes` page — not
+found until after this report's first draft — documents exactly two calling conventions
+("Name Mode": bare names + a required `scope_type` field; "ID Mode": full document IDs +
+`scope_type` omitted) and explicitly documents that mixing them (bare names, no `scope_type`)
+"returns 500". Attempt 2's success (full URIs, no `scope_type`) is Name Mode's "ID Mode"
+working exactly as documented. Retested directly against Name Mode as documented
+(`scope_type:"database"` + bare names) and it succeeded on the first try. **No doc issue here
+— retracted; see the "documentation got wrong" section below for the corrected tally.**
 
 **This is a possible negative finding, and it applies asymmetrically:**
 - `reset` **can** be withheld — it requires `commit_read_access`, which is a separately
@@ -379,19 +387,32 @@ we tested against" are not the same commit.
 
 ## 3. Anything the documentation got wrong
 
+Four candidate documentation issues were identified while writing this report. One did not
+survive a follow-up check against a docs page this spike hadn't found yet (see the correction
+in E4 above) and was retracted. The remaining three were filed as GitHub issues:
+
 - **`POST /api/apply`'s own example** sets `before_commit` to a branch tip rather than the
   common ancestor — and following it silently loses data (E1). This is the most consequential
-  documentation error found in this spike.
-- The conflict witness schema is `{"@id", "<field>": {"@expected","@found","@op":"Conflict"}}`,
-  not the `@before`/`@after_left`/`@after_right` shape one would infer from the docs' general
-  description of three-way merge witnesses (E1).
-- `/api/capabilities`'s `scope`/`user`/`roles` fields require full `terminusdb://system/data/...`
-  resource URIs. Passing the `org/db`-style shorthand used by most other endpoints in this API
-  (branch, document, apply, reset, etc.) does not produce a helpful validation error — it
-  produces a bare HTTP 500 `"Unexpected failure in request handler"` (E4).
+  documentation error found in this spike. The same pattern, with the tip parameter literally
+  commented `// before (common ancestor)` in the TypeScript example, appears in
+  `terminusdb-docs-static`'s `merge-howto/page.md` (lines 51-52, 95-96, 220-221, 249),
+  `branch-howto/page.md` (lines 320-321, 364-365, 430), and
+  `version-control-operations/page.md` (line 116) — all three also claim "no silent overwrites"
+  in the same section as the unsafe example.
+  **Filed:** [dfrnt-labs/terminusdb-docs-static#22](https://github.com/dfrnt-labs/terminusdb-docs-static/issues/22)
+- The documented conflict response for `/api/apply` is wrong on two counts: it shows
+  `"@type": "api:ApplyResponse"` (the actual `@type` on conflict is `api:ApplyError`), and its
+  witness shape is `{"@op":"SwapValue","@before":...,"@after_left":...,"@after_right":...}`
+  where the actual engine returns `{"@op":"Conflict","@expected":...,"@found":...}` (E1). Same
+  two files, `merge-howto/page.md` (~117-135) and `branch-howto/page.md` (~332-340).
+  **Filed:** [dfrnt-labs/terminusdb-docs-static#23](https://github.com/dfrnt-labs/terminusdb-docs-static/issues/23)
+- ~~`/api/capabilities`'s `scope`/`user`/`roles` fields require full URIs, undocumented~~ —
+  **retracted.** `capabilities-api-modes/page.md` documents this exactly (Name Mode vs ID Mode,
+  and the 500 you get from mixing them). Not filed.
 - Neither `GETTING_STARTED.md` nor `docs/CONTRIBUTING.md`'s macOS build instructions mention
   that `protoc` must be installed, or that `make install-deps` must run before `make dev` to
   fetch the `tus` Prolog pack — both are required for a clean build from a fresh clone (F1).
+  **Filed:** [terminusdb/terminusdb#2500](https://github.com/terminusdb/terminusdb/issues/2500)
 
 ## Out of scope (per brief, not attempted)
 
