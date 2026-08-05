@@ -38,9 +38,18 @@ file terminusdb
 
 echo "== smoke test: serve and hit /api/info =="
 STORAGE_DIR="$(mktemp -d)"
+SERVER_PID=""
+cleanup() {
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  rm -rf "$STORAGE_DIR"
+}
+trap cleanup EXIT
+
 TERMINUSDB_SERVER_PORT=6364 TERMINUSDB_STORAGE_PATH="$STORAGE_DIR" ./terminusdb store init --force
 TERMINUSDB_SERVER_PORT=6364 TERMINUSDB_STORAGE_PATH="$STORAGE_DIR" TERMINUSDB_ADMIN_PASS=root ./terminusdb serve &
 SERVER_PID=$!
 sleep 6
 curl -sS -u admin:root http://localhost:6364/api/info -w '\nHTTP_STATUS:%{http_code}\n'
-kill "$SERVER_PID"
