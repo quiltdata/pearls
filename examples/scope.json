@@ -1,0 +1,9 @@
+{
+  "readable": [
+    "input-control/worker.json",
+    "input-content/"
+  ],
+  "writable_package": "scenes/example/output@my-project-bucket",
+  "require_version_ids": true,
+  "allow_prefix_fallback": false
+}

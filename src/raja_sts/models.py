@@ -1,0 +1,131 @@
+"""Immutable values returned by the manifest, policy, and STS layers."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal
+
+PolicyMode = Literal["per-object-version", "per-object", "mixed", "per-prefix"]
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedManifestURI:
+    """A fully resolved Quilt package revision."""
+
+    bucket: str
+    package_name: str
+    top_hash: str
+    original: str
+
+    @property
+    def registry(self) -> str:
+        """Return the registry URI accepted by ``quilt3.Package.browse``."""
+        return f"s3://{self.bucket}"
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestObject:
+    """One logical Quilt entry resolved to an S3 object."""
+
+    logical_key: str
+    bucket: str
+    key: str
+    version_id: str | None = None
+    hash_type: str | None = None
+    hash_value: str | None = None
+
+    @property
+    def arn(self) -> str:
+        """Return the IAM resource ARN for this exact S3 key."""
+        return f"arn:aws:s3:::{self.bucket}/{self.key}"
+
+
+@dataclass(frozen=True, slots=True)
+class OutputPackage:
+    """The bounded namespace in which a descendant Quilt package may be written."""
+
+    name: str
+    bucket: str
+
+    @property
+    def data_prefix(self) -> str:
+        """Return the deterministic data prefix used by Quilt's default push layout."""
+        return f"{self.name}/"
+
+    @property
+    def resources(self) -> tuple[str, str, str]:
+        """Return data, immutable-manifest, and named-package pointer namespaces."""
+        root = f"arn:aws:s3:::{self.bucket}/"
+        return (
+            f"{root}{self.data_prefix}*",
+            f"{root}.quilt/packages/*",
+            f"{root}.quilt/named_packages/{self.name}/*",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledPolicy:
+    """A deterministic inline session policy plus a non-secret authority report."""
+
+    document: Mapping[str, Any]
+    policy_json: str
+    mode: PolicyMode
+    manifest: PinnedManifestURI
+    readable_selectors: tuple[str, ...]
+    selected_objects: tuple[ManifestObject, ...]
+    output_package: OutputPackage
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def size(self) -> int:
+        """Return the plaintext character count enforced by STS."""
+        return len(self.policy_json)
+
+    def report(self) -> dict[str, Any]:
+        """Return serializable, non-secret compilation evidence."""
+        return {
+            "manifest_uri": self.manifest.original,
+            "top_hash": self.manifest.top_hash,
+            "mode": self.mode,
+            "policy_size": self.size,
+            "readable_selectors": list(self.readable_selectors),
+            "selected_objects": [
+                {
+                    "logical_key": item.logical_key,
+                    "bucket": item.bucket,
+                    "key": item.key,
+                    "version_id": item.version_id,
+                }
+                for item in self.selected_objects
+            ],
+            "writable_package": f"{self.output_package.name}@{self.output_package.bucket}",
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedCredentials:
+    """Temporary credentials minted for one Scene.
+
+    Secret fields are deliberately excluded from ``repr``. Callers should pass them
+    directly to an SDK or isolated worker and must not write them to transcripts.
+    """
+
+    access_key_id: str = field(repr=False)
+    secret_access_key: str = field(repr=False)
+    session_token: str = field(repr=False)
+    expiration: datetime
+    assumed_role_arn: str
+    assumed_role_id: str
+    packed_policy_size: int
+    compilation: CompiledPolicy
+
+    def boto3_kwargs(self) -> dict[str, str]:
+        """Return keyword arguments suitable for a scoped ``boto3.Session``."""
+        return {
+            "aws_access_key_id": self.access_key_id,
+            "aws_secret_access_key": self.secret_access_key,
+            "aws_session_token": self.session_token,
+        }
