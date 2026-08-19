@@ -318,6 +318,10 @@ run.
   `Package.push()` performs an optional manifest listing after the write to
   render a short hash, so a no-list integration must suppress or replace that
   presentation step; do not grant broad listing merely for display.
+- Multipart create/upload/complete operations use `s3:PutObject`, but
+  `s3:AbortMultipartUpload` is intentionally absent. Failed multipart uploads
+  can leave billable incomplete parts; output buckets should configure an
+  `AbortIncompleteMultipartUpload` lifecycle rule.
 - The compiler emits commercial-partition (`arn:aws`) S3 resources in 0.1.0
   and rejects GovCloud/China role ARNs rather than minting mismatched policy.
 - The compiler bounds a namespace; it does not prove that an output Package

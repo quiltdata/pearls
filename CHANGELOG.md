@@ -52,6 +52,8 @@ All notable changes to this project are documented in this file.
   `Package.push()` performs a post-write manifest listing to display a short
   hash; no-list integrations must suppress or replace that optional
   presentation step.
+- Multipart abort authority is absent; output buckets need an
+  `AbortIncompleteMultipartUpload` lifecycle rule to remove incomplete parts.
 - The 0.1.0 policy compiler supports the commercial AWS partition only.
 - Physical-prefix fallback deliberately weakens logical and version isolation,
   can include sibling Quilt control objects when a widened prefix overlaps
