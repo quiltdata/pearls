@@ -24,6 +24,11 @@ class PinnedManifestURI:
         """Return the registry URI accepted by ``quilt3.Package.browse``."""
         return f"s3://{self.bucket}"
 
+    @property
+    def manifest_arn(self) -> str:
+        """Return the exact content-addressed Quilt manifest resource."""
+        return f"arn:aws:s3:::{self.bucket}/.quilt/packages/{self.top_hash}"
+
 
 @dataclass(frozen=True, slots=True)
 class ManifestObject:
@@ -55,14 +60,28 @@ class OutputPackage:
         return f"{self.name}/"
 
     @property
-    def resources(self) -> tuple[str, str, str]:
-        """Return data, immutable-manifest, and named-package pointer namespaces."""
+    def write_resources(self) -> tuple[str, str, str]:
+        """Return data, immutable-manifest, and named-package write namespaces."""
         root = f"arn:aws:s3:::{self.bucket}/"
         return (
             f"{root}{self.data_prefix}*",
             f"{root}.quilt/packages/*",
             f"{root}.quilt/named_packages/{self.name}/*",
         )
+
+    @property
+    def read_resources(self) -> tuple[str, str]:
+        """Return Quilt workflow and exact output-pointer read resources."""
+        root = f"arn:aws:s3:::{self.bucket}/.quilt/"
+        return (
+            f"{root}workflows/*",
+            f"{root}named_packages/{self.name}/latest",
+        )
+
+    @property
+    def resources(self) -> tuple[str, str, str]:
+        """Return the write resources retained for API compatibility."""
+        return self.write_resources
 
 
 @dataclass(frozen=True, slots=True)

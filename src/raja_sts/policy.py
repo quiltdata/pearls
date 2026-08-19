@@ -62,8 +62,12 @@ def _resolve_selectors(
     return tuple(selected[key] for key in sorted(selected))
 
 
+def _deduplicate(resources: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(resources))
+
+
 def _guardrail_statements(
-    read_resources: Sequence[str], output: OutputPackage
+    current_read_resources: Sequence[str], output: OutputPackage
 ) -> list[dict[str, Any]]:
     """Return explicit denies that resource policies cannot bypass."""
     return [
@@ -74,13 +78,13 @@ def _guardrail_statements(
         },
         {
             "Effect": "Deny",
-            "Action": ["s3:GetObject", "s3:GetObjectVersion"],
-            "NotResource": list(read_resources),
+            "Action": "s3:GetObject",
+            "NotResource": _deduplicate(current_read_resources),
         },
         {
             "Effect": "Deny",
             "Action": "s3:PutObject",
-            "NotResource": list(output.resources),
+            "NotResource": list(output.write_resources),
         },
     ]
 
@@ -89,58 +93,56 @@ def _write_statement(output: OutputPackage) -> dict[str, Any]:
     return {
         "Effect": "Allow",
         "Action": "s3:PutObject",
-        "Resource": list(output.resources),
+        "Resource": list(output.write_resources),
+    }
+
+
+def _current_read_statement(resources: Sequence[str]) -> dict[str, Any]:
+    """Allow current-object reads for exact versionless resources."""
+    return {
+        "Effect": "Allow",
+        "Action": "s3:GetObject",
+        "Resource": _deduplicate(resources),
     }
 
 
 def _exact_read_statements(
-    objects: Sequence[ManifestObject],
+    objects: Sequence[ManifestObject], metadata_resources: Sequence[str]
 ) -> tuple[list[dict[str, Any]], PolicyMode]:
     versioned = [item for item in objects if item.version_id is not None]
     unversioned = [item for item in objects if item.version_id is None]
     statements: list[dict[str, Any]] = []
 
     if versioned:
-        statements.append(
-            {
-                "Effect": "Deny",
-                "Action": "s3:GetObject",
-                "Resource": [item.arn for item in versioned],
-            }
-        )
-        for item in versioned:
-            statements.extend(
-                [
-                    {
-                        "Effect": "Deny",
-                        "Action": "s3:GetObjectVersion",
-                        "Resource": item.arn,
-                        "Condition": {"StringNotEquals": {"s3:VersionId": item.version_id}},
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Action": "s3:GetObjectVersion",
-                        "Resource": item.arn,
-                        "Condition": {"StringEquals": {"s3:VersionId": item.version_id}},
-                    },
-                ]
-            )
-    if unversioned:
-        resources = [item.arn for item in unversioned]
+        resources = _deduplicate([item.arn for item in versioned])
+        version_ids = list(dict.fromkeys(item.version_id for item in versioned))
         statements.extend(
             [
                 {
                     "Effect": "Deny",
                     "Action": "s3:GetObjectVersion",
-                    "Resource": resources,
+                    "Resource": "*",
+                    "Condition": {"StringNotEquals": {"s3:VersionId": version_ids}},
                 },
                 {
                     "Effect": "Allow",
-                    "Action": "s3:GetObject",
+                    "Action": "s3:GetObjectVersion",
                     "Resource": resources,
                 },
             ]
         )
+    else:
+        statements.append(
+            {
+                "Effect": "Deny",
+                "Action": "s3:GetObjectVersion",
+                "Resource": "*",
+            }
+        )
+
+    current_resources = [item.arn for item in unversioned]
+    current_resources.extend(metadata_resources)
+    statements.append(_current_read_statement(current_resources))
 
     if versioned and unversioned:
         mode: PolicyMode = "mixed"
@@ -231,9 +233,11 @@ def compile(
             "selected objects have no S3 version ID: " + ", ".join(missing_versions)
         )
 
-    read_statements, mode = _exact_read_statements(selected)
-    exact_read_resources = [item.arn for item in selected]
-    guardrails = _guardrail_statements(exact_read_resources, output)
+    metadata_read_resources = [manifest.manifest_arn, *output.read_resources]
+    read_statements, mode = _exact_read_statements(selected, metadata_read_resources)
+    current_read_resources = [item.arn for item in selected if item.version_id is None]
+    current_read_resources.extend(metadata_read_resources)
+    guardrails = _guardrail_statements(current_read_resources, output)
     document, policy_json = _serialize([*guardrails, *read_statements, _write_statement(output)])
     warnings: tuple[str, ...] = ()
     if missing_versions:
@@ -248,11 +252,20 @@ def compile(
                 f"inline session policy is {len(policy_json)} characters; "
                 f"limit is {max_policy_characters}; prefix fallback was not authorized"
             )
-        read_statements, prefix_warnings = _prefix_read_statements(selected)
+        prefix_statements, prefix_warnings = _prefix_read_statements(selected)
         mode = "per-prefix"
         warnings += prefix_warnings
-        prefix_resources = read_statements[0]["Resource"]
-        guardrails = _guardrail_statements(prefix_resources, output)
+        prefix_resources = prefix_statements[0]["Resource"]
+        read_statements = [
+            {
+                "Effect": "Deny",
+                "Action": "s3:GetObjectVersion",
+                "NotResource": prefix_resources,
+            },
+            *prefix_statements,
+            _current_read_statement(metadata_read_resources),
+        ]
+        guardrails = _guardrail_statements([*prefix_resources, *metadata_read_resources], output)
         document, policy_json = _serialize(
             [*guardrails, *read_statements, _write_statement(output)]
         )

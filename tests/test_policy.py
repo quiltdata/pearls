@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 
 import pytest
-from conftest import MANIFEST_URI
+from conftest import MANIFEST_URI, TOP_HASH
 
 from raja_sts import InvalidScopeError, ManifestObject, PolicySizeError, compile
 from raja_sts.models import PinnedManifestURI
@@ -39,18 +39,69 @@ def test_compile_maps_logical_scope_to_exact_versioned_resources(
     reads = [
         item for item in statements if item["Effect"] == "Allow" and "Get" in str(item["Action"])
     ]
-    assert len(reads) == 3
-    assert all(item["Action"] == "s3:GetObjectVersion" for item in reads)
-    assert reads[0]["Condition"]["StringEquals"]["s3:VersionId"] == "version-data"
+    assert len(reads) == 2
+    version_read = next(item for item in reads if item["Action"] == "s3:GetObjectVersion")
+    assert version_read["Resource"] == [
+        "arn:aws:s3:::input-bucket/sealed/data.csv",
+        "arn:aws:s3:::input-bucket/sealed/notes.txt",
+        "arn:aws:s3:::control-bucket/scenes/worker.json",
+    ]
+    assert "Condition" not in version_read
+    metadata_read = next(item for item in reads if item["Action"] == "s3:GetObject")
+    assert metadata_read["Resource"] == [
+        f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
+        "arn:aws:s3:::output-bucket/.quilt/workflows/*",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
+    ]
     wrong_version_denies = [
         item
         for item in statements
         if item["Effect"] == "Deny" and "StringNotEquals" in item.get("Condition", {})
     ]
-    assert len(wrong_version_denies) == 3
-    assert wrong_version_denies[0]["Condition"]["StringNotEquals"]["s3:VersionId"] == (
-        "version-data"
+    assert len(wrong_version_denies) == 1
+    assert wrong_version_denies[0]["Resource"] == "*"
+    assert wrong_version_denies[0]["Condition"]["StringNotEquals"]["s3:VersionId"] == [
+        "version-data",
+        "version-notes",
+        "version-worker",
+    ]
+
+
+def test_five_object_scene_stays_exact_and_under_sts_limit(manifest_loader) -> None:
+    result = compile(
+        MANIFEST_URI,
+        {
+            "readable": ["input-content/", "input-control/", "rubric/secret.json"],
+            "writable_package": "project/scene-output@output-bucket",
+            "require_version_ids": True,
+        },
+        manifest_loader=manifest_loader,
     )
+
+    assert result.mode == "per-object-version"
+    assert len(result.selected_objects) == 5
+    assert result.size == 1674
+    version_denies = [
+        statement
+        for statement in result.document["Statement"]
+        if statement.get("Condition", {}).get("StringNotEquals")
+    ]
+    assert len(version_denies) == 1
+    assert version_denies[0]["Resource"] == "*"
+    assert set(version_denies[0]["Condition"]["StringNotEquals"]["s3:VersionId"]) == {
+        "version-data",
+        "version-notes",
+        "version-worker",
+        "version-supervisor",
+        "version-secret",
+    }
+    version_allows = [
+        statement
+        for statement in result.document["Statement"]
+        if statement["Effect"] == "Allow" and statement["Action"] == "s3:GetObjectVersion"
+    ]
+    assert len(version_allows) == 1
+    assert len(version_allows[0]["Resource"]) == 5
 
 
 def test_compile_allows_only_put_in_output_namespaces_and_explicitly_denies_bypass(
@@ -66,9 +117,15 @@ def test_compile_allows_only_put_in_output_namespaces_and_explicitly_denies_bypa
         "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
         "Resource": "*",
     }
-    assert read_boundary["Effect"] == "Deny"
-    assert read_boundary["Action"] == ["s3:GetObject", "s3:GetObjectVersion"]
-    assert "arn:aws:s3:::control-bucket/scenes/supervisor.json" not in read_boundary["NotResource"]
+    assert read_boundary == {
+        "Effect": "Deny",
+        "Action": "s3:GetObject",
+        "NotResource": [
+            f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
+            "arn:aws:s3:::output-bucket/.quilt/workflows/*",
+            "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
+        ],
+    }
     assert write_boundary == {
         "Effect": "Deny",
         "Action": "s3:PutObject",

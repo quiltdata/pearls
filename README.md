@@ -126,9 +126,10 @@ quilt+s3://manifest-bucket#package=project%2Fsealed-scene&top_hash=<64 hex chara
 
 The package name is URL encoded in the fragment. Floating package pointers,
 hash prefixes, local files, wildcard-bearing S3 keys, and unpinned manifests
-are rejected. The trusted compiler identity needs permission to browse this
-manifest; the resulting worker credential does not receive manifest-registry
-read access automatically.
+are rejected. The trusted compiler identity needs permission to resolve the
+manifest. The resulting worker credential can read only that package revision's
+exact `.quilt/packages/<top-hash>` manifest object from the input registry; it
+does not receive floating-pointer or sibling-manifest access.
 
 A scope is a mapping like [`examples/scope.json`](examples/scope.json):
 
@@ -188,39 +189,51 @@ must never be logged or committed.
 
 | Scene role | AWS-native enforcement |
 | --- | --- |
-| Input Control | Only selected control logical keys resolve to read statements. Sibling control files are absent from the allow set. |
-| Input Content | Selected content keys receive exact S3 object ARNs. When a manifest entry has a version ID, the policy uses `s3:GetObjectVersion` with an `s3:VersionId` equality condition. |
-| Output Content | `s3:PutObject` is limited to `<package-name>/*` in the declared output bucket. |
-| Output Control | Quilt manifest blobs may be written under `.quilt/packages/*`; named-package pointers are limited to `.quilt/named_packages/<package-name>/*` in that same bucket. |
+| Input Control | Only selected control logical keys resolve to versioned read resources. Sibling control files are absent from the allow set. |
+| Input Content | Selected content keys receive exact S3 object ARNs. One set-based deny admits only the selected `s3:VersionId` values, and S3 rejects a selected version ID when requested against a different object key. |
+| Output Content | `s3:PutObject` is limited to `<package-name>/*` in the declared output bucket. Quilt consumer validation may read `.quilt/workflows/*` in that bucket. |
+| Output Control | Quilt manifest blobs may be written under `.quilt/packages/*`; named-package pointers are limited to `.quilt/named_packages/<package-name>/*`, with an exact read of that package's `latest` pointer for conflict checking. |
 
 Every session policy explicitly denies deletes and bucket listing on all
-resources. `NotResource` deny guardrails prevent bucket policies from restoring
-out-of-scope `GetObject`, `GetObjectVersion`, or `PutObject` access; strict
-version mode also denies latest and mismatched-version reads on selected keys.
-The policy grants no IAM, STS, ACL, bucket-policy, or input-write action.
+resources. Action-specific `NotResource` guardrails prevent bucket policies
+from restoring out-of-scope current-object reads or writes. Exact version mode
+uses one global mismatch deny containing the sealed set of S3 version IDs and
+one resource-set allow containing the selected object ARNs. Because S3 version
+IDs uniquely identify stored object versions, using an admitted ID against a
+different key does not return that key. The policy grants no IAM, STS, ACL,
+bucket-policy, or input-write action.
 Because a session policy can only narrow its base role, the agent cannot add
 authority during the session. Promotion of output into a later Scene's inputs
 remains separately authorized.
 
 ### Policy-size behavior
 
-STS limits an inline session policy to 2,048 plaintext characters. The
-compiler minifies and measures exact per-object policy JSON before calling
-AWS. It fails closed with `PolicySizeError` when the policy does not fit.
+STS limits an inline session policy to 2,048 plaintext characters. Exact mode
+uses set-based version-ID and resource lists rather than two statements per
+object, then minifies and measures the JSON before calling AWS. The five-object
+Scene regression compiles to 1,674 characters with all required Quilt metadata
+reads and remains version-pinned. The compiler fails closed with
+`PolicySizeError` when a larger policy does not fit.
 
 A sealed scope may explicitly set `allow_prefix_fallback` to `true`. The
 compiler then emits common physical S3-prefix resources and reports
 `mode="per-prefix"`, every widened resource, and loss of version enforcement.
-This fallback can expose objects that are not in the selected manifest; it is
-never automatic. Splitting work into smaller Scenes is the safer response.
+This fallback can expose objects that are not in the selected manifest; a root
+or `.quilt/`-overlapping widened prefix can also expose sibling Quilt control
+objects. These losses are listed in the compilation report and the fallback is
+never automatic. Exact metadata-boundary claims apply only outside
+`per-prefix` mode. Splitting work into smaller Scenes is the safer response.
 
 ### Base role
 
 [`infra/scene-execution-role.yaml`](infra/scene-execution-role.yaml) is an
 administrator-applied CloudFormation template. It creates no buckets and the
-Python module never creates IAM resources. The role is deliberately broad
-within a controlled project-bucket ARN pattern so the session policy provides
-the real per-Scene bound.
+Python module never creates IAM resources. The role is broad for reads and
+writes within a controlled project-bucket ARN pattern so the session policy
+provides the per-Scene bound, but it deliberately has no object or version
+delete permission. A caller that assumes the role without RAJA's session
+policy therefore cannot turn the append-only execution role into cleanup
+authority.
 
 An administrator can deploy it with an account-specific principal and bucket
 pattern:
@@ -248,12 +261,16 @@ otherwise it can bypass the scoped credentials entirely.
 [`tests/aws/test_authorization.py`](tests/aws/test_authorization.py) is an
 opt-in proof against real IAM, STS, and S3. An unrestricted session of the
 same base role first proves that the denied read/version and outside-write
-operations are otherwise allowed. The scoped session then proves an in-scope
-version read; a data, manifest, and named-pointer write; and denial of sibling
-reads, wrong versions, outside writes, listing, object deletion, and version
-deletion. The harness requires versioned disposable buckets, removes its proof
-objects with the baseline session, does not provision infrastructure, and
-never runs merely because AWS credentials are present.
+operations are otherwise allowed, and that even a bare base session cannot
+delete versions. The scoped session then proves an in-scope version read;
+reads of the pinned input manifest, output workflow configuration, and exact
+output `latest` pointer; data, manifest, and named-pointer writes; and denial
+of sibling reads, wrong versions, outside writes, listing, object deletion,
+and version deletion. A separate administrator-managed cleanup role removes
+the exact disposable versions in `finally`; cleanup authority is never present
+on the Scene role or scoped worker. The harness requires versioned disposable
+buckets, does not provision infrastructure, and never runs merely because AWS
+credentials are present.
 
 Configure an administrator-owned sandbox, then run:
 
@@ -262,14 +279,23 @@ export RAJA_STS_RUN_AWS_PROOF=1
 export RAJA_STS_MANIFEST_URI='quilt+s3://...#package=...&top_hash=...'
 export RAJA_STS_SCOPE_FILE="$PWD/examples/scope.json"
 export RAJA_STS_ROLE_ARN='arn:aws:iam::123456789012:role/scene-execution'
+export RAJA_STS_CLEANUP_ROLE_ARN='arn:aws:iam::123456789012:role/scene-proof-cleanup'
 export RAJA_STS_ALLOWED_READ='s3://bucket/key?versionId=expected-version'
+# A different selected key paired with the expected version ID; S3 must return NoSuchVersion.
+export RAJA_STS_CROSS_OBJECT_VERSION_READ='s3://bucket/other-selected-key?versionId=expected-version'
 export RAJA_STS_WRONG_VERSION_READ='s3://bucket/key?versionId=other-existing-version'
 export RAJA_STS_DENIED_READ='s3://bucket/sibling-control.json?versionId=existing-version'
+export RAJA_STS_WORKFLOW_READ='s3://output-bucket/.quilt/workflows/config.yml'
+export RAJA_STS_OUTPUT_LATEST_READ='s3://output-bucket/.quilt/named_packages/scenes/example/output/latest'
 export RAJA_STS_ALLOWED_WRITE='s3://output-bucket/scenes/example/output/proof.txt'
 export RAJA_STS_DENIED_WRITE='s3://output-bucket/outside-output/proof.txt'
 export RAJA_STS_TRANSCRIPT="$PWD/evidence/aws-taj/aws-proof-transcript.jsonl"
 pytest -m aws tests/aws/test_authorization.py
 ```
+
+The cleanup role is sandbox-only and should grant version deletion solely for
+the disposable proof resources. Set `RAJA_STS_CLEANUP_EXTERNAL_ID` if its trust
+policy requires a distinct external ID.
 
 The JSONL transcript preserves operation outcomes, HTTP status codes, AWS
 request IDs, assumed-role audit metadata, and the compilation report. It does
@@ -283,12 +309,15 @@ run.
   current version. Strong append-only semantics require unique keys plus
   bucket versioning, Object Lock, conditional writes, or a trusted finalizer.
 - The broad `.quilt/packages/*` output namespace is required because a new
-  manifest's content hash is unknown before the worker builds it. The mutable
-  named-package namespace remains package-specific. Only `PutObject` is
-  granted: Quilt 8's default `Package.push()` also reads the latest pointer and
-  lists manifests for display, so it is intentionally incompatible with these
-  credentials. Use a least-authority writer or a separately trusted finalizer;
-  do not add `ListBucket` merely to make the default client path work.
+  manifest's content hash is unknown before the worker builds it. Quilt3's
+  content-addressed API contract derives that key from the manifest bytes;
+  enforcing the contract against raw S3 callers belongs to a separate system
+  boundary. The worker may read the exact pinned input manifest, output
+  workflow namespace, and exact output `latest` pointer needed by the consumer
+  and conflict-check paths. `ListBucket` remains denied. Quilt 8's public
+  `Package.push()` performs an optional manifest listing after the write to
+  render a short hash, so a no-list integration must suppress or replace that
+  presentation step; do not grant broad listing merely for display.
 - The compiler emits commercial-partition (`arn:aws`) S3 resources in 0.1.0
   and rejects GovCloud/China role ARNs rather than minting mismatched policy.
 - The compiler bounds a namespace; it does not prove that an output Package
@@ -311,6 +340,9 @@ run.
   environment-gated because CI has no AWS sandbox; do not treat a mocked test
   as evidence of AWS's authorization behavior.
 
+The set-based version guard relies on Amazon S3 assigning a unique version ID
+to each stored object version, as documented in
+[Retaining multiple versions of objects with S3 Versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html).
 Quilt manifest loading follows the public
 [`Package.browse`](https://docs.quiltdata.com/api-reference/package) API.
 Content was rephrased for compliance with licensing restrictions.

@@ -43,6 +43,7 @@ def test_parse_manifest_uri_returns_a_pinned_revision() -> None:
         original=MANIFEST_URI,
     )
     assert result.registry == "s3://manifest-bucket"
+    assert result.manifest_arn == (f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}")
 
 
 @pytest.mark.parametrize(
@@ -57,10 +58,15 @@ def test_parse_output_package_rejects_unsafe_names(value: object) -> None:
 def test_parse_output_package_derives_quilt_namespaces() -> None:
     output = parse_output_package("project/output@output-bucket")
     assert output.data_prefix == "project/output/"
-    assert output.resources == (
+    assert output.write_resources == (
         "arn:aws:s3:::output-bucket/project/output/*",
         "arn:aws:s3:::output-bucket/.quilt/packages/*",
         "arn:aws:s3:::output-bucket/.quilt/named_packages/project/output/*",
+    )
+    assert output.resources == output.write_resources
+    assert output.read_resources == (
+        "arn:aws:s3:::output-bucket/.quilt/workflows/*",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/output/latest",
     )
 
 

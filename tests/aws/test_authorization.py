@@ -1,9 +1,10 @@
 """Opt-in proof against real AWS IAM/STS/S3 authorization.
 
 This test never provisions infrastructure. It requires an administrator-created,
-versioned sandbox, a pinned package, the base role, and disposable object URIs
-supplied through the environment. It records request metadata but no credentials
-or response bodies and uses the unrestricted base session as a positive baseline.
+versioned sandbox, a pinned package, the base role, a separate cleanup role, and
+disposable object URIs supplied through the environment. It records request
+metadata but no credentials or response bodies. The unrestricted base session
+provides positive read/write baselines but has no delete authority.
 """
 
 from __future__ import annotations
@@ -34,9 +35,13 @@ _REQUIRED_ENV = (
     "RAJA_STS_MANIFEST_URI",
     "RAJA_STS_SCOPE_FILE",
     "RAJA_STS_ROLE_ARN",
+    "RAJA_STS_CLEANUP_ROLE_ARN",
     "RAJA_STS_ALLOWED_READ",
+    "RAJA_STS_CROSS_OBJECT_VERSION_READ",
     "RAJA_STS_WRONG_VERSION_READ",
     "RAJA_STS_DENIED_READ",
+    "RAJA_STS_WORKFLOW_READ",
+    "RAJA_STS_OUTPUT_LATEST_READ",
     "RAJA_STS_ALLOWED_WRITE",
     "RAJA_STS_DENIED_WRITE",
 )
@@ -94,21 +99,50 @@ def _expect_denied(transcript: Path, operation: str, call: Any, **kwargs: Any) -
         pytest.fail(f"{operation} unexpectedly succeeded")
 
 
-def _assume_unrestricted_base(role_arn: str, scene_id: str) -> dict[str, str]:
+def _expect_missing(transcript: Path, operation: str, call: Any, **kwargs: Any) -> None:
+    try:
+        call(**kwargs)
+    except ClientError as error:
+        response = error.response
+        code = response["Error"]["Code"]
+        _record(
+            transcript,
+            operation,
+            "not-found",
+            {
+                "error_code": code,
+                "http_status": response["ResponseMetadata"]["HTTPStatusCode"],
+                "request_id": response["ResponseMetadata"].get("RequestId"),
+            },
+        )
+        assert code in {"NoSuchKey", "NoSuchVersion"}
+    else:
+        pytest.fail(f"{operation} unexpectedly returned an object")
+
+
+def _assume_role(
+    role_arn: str,
+    scene_id: str,
+    purpose: str,
+    external_id: str | None,
+) -> tuple[dict[str, str], str]:
     request: dict[str, Any] = {
         "RoleArn": role_arn,
-        "RoleSessionName": f"{scene_id}-baseline"[:64],
+        "RoleSessionName": f"{scene_id}-{purpose}"[:64],
         "DurationSeconds": 900,
     }
-    if external_id := os.getenv("RAJA_STS_EXTERNAL_ID"):
+    if external_id:
         request["ExternalId"] = external_id
     response = boto3.client("sts").assume_role(**request)
     credentials = response["Credentials"]
-    return {
-        "aws_access_key_id": credentials["AccessKeyId"],
-        "aws_secret_access_key": credentials["SecretAccessKey"],
-        "aws_session_token": credentials["SessionToken"],
-    }
+    return (
+        {
+            "aws_access_key_id": credentials["AccessKeyId"],
+            "aws_secret_access_key": credentials["SecretAccessKey"],
+            "aws_session_token": credentials["SessionToken"],
+        },
+        response["AssumedRoleUser"]["Arn"],
+    )
 
 
 def _get_and_close(client: Any, target: dict[str, str]) -> dict[str, Any]:
@@ -145,18 +179,43 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
     transcript = Path(os.getenv("RAJA_STS_TRANSCRIPT", tmp_path / "aws-proof-transcript.jsonl"))
     transcript.unlink(missing_ok=True)
 
-    baseline_s3 = boto3.client(
-        "s3",
-        **_assume_unrestricted_base(os.environ["RAJA_STS_ROLE_ARN"], scene_id),
+    role_arn = os.environ["RAJA_STS_ROLE_ARN"]
+    cleanup_role_arn = os.environ["RAJA_STS_CLEANUP_ROLE_ARN"]
+    assert cleanup_role_arn != role_arn, "cleanup and Scene execution roles must differ"
+    baseline_kwargs, baseline_assumed_role_arn = _assume_role(
+        role_arn,
+        scene_id,
+        "baseline",
+        os.getenv("RAJA_STS_EXTERNAL_ID"),
     )
+    cleanup_kwargs, cleanup_assumed_role_arn = _assume_role(
+        cleanup_role_arn,
+        scene_id,
+        "cleanup",
+        os.getenv("RAJA_STS_CLEANUP_EXTERNAL_ID"),
+    )
+    baseline_s3 = boto3.client("s3", **baseline_kwargs)
+    cleanup_s3 = boto3.client("s3", **cleanup_kwargs)
     scoped = mint(
         os.environ["RAJA_STS_MANIFEST_URI"],
         scope,
-        role_arn=os.environ["RAJA_STS_ROLE_ARN"],
+        role_arn=role_arn,
         scene_id=scene_id,
         external_id=os.getenv("RAJA_STS_EXTERNAL_ID"),
     )
     scoped_s3 = boto3.client("s3", **scoped.boto3_kwargs())
+    _record(
+        transcript,
+        "AssumeRole:baseline",
+        "allowed",
+        {"assumed_role_arn": baseline_assumed_role_arn},
+    )
+    _record(
+        transcript,
+        "AssumeRole:cleanup",
+        "allowed",
+        {"assumed_role_arn": cleanup_assumed_role_arn},
+    )
     _record(
         transcript,
         "AssumeRole:scoped",
@@ -171,15 +230,39 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
     )
 
     allowed_read = _s3_target(os.environ["RAJA_STS_ALLOWED_READ"])
+    cross_object_version = _s3_target(os.environ["RAJA_STS_CROSS_OBJECT_VERSION_READ"])
     wrong_version = _s3_target(os.environ["RAJA_STS_WRONG_VERSION_READ"])
     denied_read = _s3_target(os.environ["RAJA_STS_DENIED_READ"])
+    workflow_read = _s3_target(os.environ["RAJA_STS_WORKFLOW_READ"])
+    output_latest_read = _s3_target(os.environ["RAJA_STS_OUTPUT_LATEST_READ"])
+    manifest_read = {
+        "Bucket": scoped.compilation.manifest.bucket,
+        "Key": f".quilt/packages/{scoped.compilation.manifest.top_hash}",
+    }
     allowed_write = _s3_target(os.environ["RAJA_STS_ALLOWED_WRITE"])
     denied_write = _s3_target(os.environ["RAJA_STS_DENIED_WRITE"])
     assert allowed_read.get("VersionId")
+    assert cross_object_version.get("VersionId") == allowed_read["VersionId"]
+    assert (cross_object_version["Bucket"], cross_object_version["Key"]) != (
+        allowed_read["Bucket"],
+        allowed_read["Key"],
+    )
+    selected_locations = {(item.bucket, item.key) for item in scoped.compilation.selected_objects}
+    assert (allowed_read["Bucket"], allowed_read["Key"]) in selected_locations
+    assert (
+        cross_object_version["Bucket"],
+        cross_object_version["Key"],
+    ) in selected_locations
     assert wrong_version.get("VersionId")
     assert allowed_read["Bucket"] == wrong_version["Bucket"]
     assert allowed_read["Key"] == wrong_version["Key"]
     assert allowed_read["VersionId"] != wrong_version["VersionId"]
+    assert workflow_read["Bucket"] == output_bucket
+    assert workflow_read["Key"].startswith(".quilt/workflows/")
+    assert output_latest_read == {
+        "Bucket": output_bucket,
+        "Key": f".quilt/named_packages/{package_name}/latest",
+    }
 
     cleanup_versions: list[tuple[str, str, str]] = []
     token = uuid4().hex
@@ -210,9 +293,24 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
             "allowed",
             _response_details(baseline_write),
         )
+        _expect_denied(
+            transcript,
+            "Baseline:DeleteObjectVersion:anywhere",
+            baseline_s3.delete_object,
+            Bucket=denied_write["Bucket"],
+            Key=denied_write["Key"],
+            VersionId=baseline_write["VersionId"],
+        )
 
         allowed = _get_and_close(scoped_s3, allowed_read)
         _record(transcript, "GetObject:in-scope", "allowed", _response_details(allowed))
+        for operation, target in (
+            ("GetObject:pinned-manifest", manifest_read),
+            ("GetObject:output-workflow", workflow_read),
+            ("GetObject:output-latest", output_latest_read),
+        ):
+            response = _get_and_close(scoped_s3, target)
+            _record(transcript, operation, "allowed", _response_details(response))
         _expect_denied(
             transcript,
             "GetObject:out-of-scope",
@@ -225,6 +323,43 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
             scoped_s3.get_object,
             **wrong_version,
         )
+        _expect_missing(
+            transcript,
+            "GetObject:admitted-version-wrong-object",
+            scoped_s3.get_object,
+            **cross_object_version,
+        )
+        _expect_denied(
+            transcript,
+            "GetObject:selected-current-version",
+            scoped_s3.get_object,
+            Bucket=allowed_read["Bucket"],
+            Key=allowed_read["Key"],
+        )
+        for operation, target in (
+            (
+                "GetObject:sibling-manifest",
+                {
+                    "Bucket": scoped.compilation.manifest.bucket,
+                    "Key": f".quilt/packages/not-selected-{token}",
+                },
+            ),
+            (
+                "GetObject:sibling-output-package",
+                {
+                    "Bucket": output_bucket,
+                    "Key": f".quilt/named_packages/not-authorized-{token}/latest",
+                },
+            ),
+            (
+                "GetObject:non-latest-output-pointer",
+                {
+                    "Bucket": output_bucket,
+                    "Key": f".quilt/named_packages/{package_name}/not-latest-{token}",
+                },
+            ),
+        ):
+            _expect_denied(transcript, operation, scoped_s3.get_object, **target)
 
         for target in output_targets:
             response = scoped_s3.put_object(**target, Body=b"scoped output proof")
@@ -269,6 +404,12 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
         )
     finally:
         for bucket, key, version_id in reversed(cleanup_versions):
-            baseline_s3.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+            response = cleanup_s3.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+            _record(
+                transcript,
+                "Cleanup:DeleteObjectVersion",
+                "allowed",
+                {"bucket": bucket, "key": key, **_response_details(response)},
+            )
 
     assert transcript.exists()
