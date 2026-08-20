@@ -47,12 +47,46 @@ class ManifestObject:
         return f"arn:aws:s3:::{self.bucket}/{self.key}"
 
 
+WriteSelectorKind = Literal["package", "subtree", "object"]
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSelector:
+    """One normalized logical write grant inside an output Quilt package."""
+
+    bucket: str
+    package_name: str
+    path: str
+    kind: WriteSelectorKind
+    original: str
+    description: str
+
+    @property
+    def data_resource(self) -> str:
+        """Return the exact IAM data resource represented by this selector."""
+        root = f"arn:aws:s3:::{self.bucket}/{self.package_name}/"
+        if self.kind == "package":
+            return f"{root}*"
+        if self.kind == "subtree":
+            return f"{root}{self.path}*"
+        return f"{root}{self.path}"
+
+    def admits(self, logical_key: str) -> bool:
+        """Return whether this selector admits a handler-produced logical key."""
+        if self.kind == "package":
+            return True
+        if self.kind == "subtree":
+            return logical_key.startswith(self.path)
+        return logical_key == self.path
+
+
 @dataclass(frozen=True, slots=True)
 class OutputPackage:
     """The bounded namespace in which a descendant Quilt package may be written."""
 
     name: str
     bucket: str
+    data_write_resources: tuple[str, ...] = ()
 
     @property
     def bucket_arn(self) -> str:
@@ -65,14 +99,20 @@ class OutputPackage:
         return f"{self.name}/"
 
     @property
-    def write_resources(self) -> tuple[str, str, str]:
-        """Return data, immutable-manifest, and named-package write namespaces."""
+    def resources(self) -> tuple[str, ...]:
+        """Return the complete bounded write set for package data and control objects."""
         root = f"arn:aws:s3:::{self.bucket}/"
+        data = self.data_write_resources or (f"{root}{self.data_prefix}*",)
         return (
-            f"{root}{self.data_prefix}*",
+            *data,
             f"{root}.quilt/packages/*",
             f"{root}.quilt/named_packages/{self.name}/*",
         )
+
+    @property
+    def write_resources(self) -> tuple[str, ...]:
+        """Return the write resources retained for API compatibility."""
+        return self.resources
 
     @property
     def read_resources(self) -> tuple[str, str]:
@@ -82,11 +122,6 @@ class OutputPackage:
             f"{root}workflows/*",
             f"{root}named_packages/{self.name}/latest",
         )
-
-    @property
-    def resources(self) -> tuple[str, str, str]:
-        """Return the write resources retained for API compatibility."""
-        return self.write_resources
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +137,7 @@ class CompiledPolicy:
     output_package: OutputPackage
     warnings: tuple[str, ...] = ()
     bedrock_model_arn: str | None = None
+    writable_selectors: tuple[OutputSelector, ...] = ()
 
     @property
     def size(self) -> int:
@@ -126,6 +162,15 @@ class CompiledPolicy:
                 for item in self.selected_objects
             ],
             "writable_package": f"{self.output_package.name}@{self.output_package.bucket}",
+            "writable_selectors": [
+                {
+                    "uri": selector.original,
+                    "description": selector.description,
+                    "kind": selector.kind,
+                    "path": selector.path,
+                }
+                for selector in self.writable_selectors
+            ],
             "bedrock_model_arn": self.bedrock_model_arn,
             "warnings": list(self.warnings),
         }

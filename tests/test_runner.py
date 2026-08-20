@@ -15,10 +15,13 @@ from raja_sts import (
     AuthorityModeError,
     HandlerContractError,
     InputIntegrityError,
+    InvalidScopeError,
+    ManifestLoadError,
     ManifestObject,
     SceneContext,
     SceneHandlerResult,
     run_scene,
+    run_scene_from_genesis,
 )
 from raja_sts.models import PinnedManifestURI
 
@@ -412,4 +415,193 @@ def test_context_without_model_and_naive_clock_fail_closed() -> None:
         _execute(
             handler=lambda *_: SceneHandlerResult({"result.txt": b"x"}, {}),
             clock=lambda: next(times),
+        )
+
+
+class GenesisS3:
+    def __init__(self, events: list[str], contents: Mapping[str, bytes]) -> None:
+        self.events = events
+        self.contents = contents
+        self.requests: list[dict[str, Any]] = []
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.events.append(f"control:{kwargs['Key']}")
+        self.requests.append(kwargs)
+        return {"Body": Body(self.contents[kwargs["Key"]]), "VersionId": kwargs["VersionId"]}
+
+
+def _genesis_loader(
+    events: list[str],
+    *,
+    readme: bytes = b"Follow the sealed instructions.",
+    outputs: bytes | None = None,
+) -> tuple[Callable[[PinnedManifestURI], Sequence[ManifestObject]], GenesisS3]:
+    outputs_content = (
+        outputs
+        or json.dumps(
+            {"quilt+s3://output-bucket/result/#package=project%2Fscene-output": "generated results"}
+        ).encode()
+    )
+    contents = {
+        "genesis/README.md": readme,
+        "genesis/outputs.json": outputs_content,
+    }
+
+    def item(logical_key: str, key: str, content: bytes) -> ManifestObject:
+        return ManifestObject(
+            logical_key=logical_key,
+            bucket="manifest-bucket",
+            key=key,
+            version_id=f"version-{logical_key}",
+            hash_type="SHA256",
+            hash_value=hashlib.sha256(content).hexdigest(),
+        )
+
+    def load(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
+        events.append("genesis-load")
+        assert manifest.original == MANIFEST_URI
+        return (
+            item("README.md", "genesis/README.md", readme),
+            item("outputs.json", "genesis/outputs.json", outputs_content),
+            ManifestObject(
+                logical_key="input/prompt.txt",
+                bucket="input-bucket",
+                key="sealed/prompt.txt",
+                version_id="input-version",
+                hash_type="SHA256",
+                hash_value=hashlib.sha256(CONTENT).hexdigest(),
+            ),
+        )
+
+    return load, GenesisS3(events, contents)
+
+
+def _execute_genesis(
+    handler: Callable[[Mapping[str, Any], Any, SceneContext], Any],
+    *,
+    outputs: bytes | None = None,
+) -> tuple[Any, list[str], FakeS3, FakeSTS, GenesisS3]:
+    events: list[str] = []
+    loader, genesis_s3 = _genesis_loader(events, outputs=outputs)
+    worker_s3 = FakeS3(events)
+    sts = FakeSTS(events)
+    session = FakeSession(events, worker_s3)
+    times = iter(
+        [
+            datetime(2026, 8, 19, 12, 0, tzinfo=UTC),
+            datetime(2026, 8, 19, 12, 1, tzinfo=UTC),
+        ]
+    )
+    result = run_scene_from_genesis(
+        MANIFEST_URI,
+        role_arn=ROLE_ARN,
+        scene_id="scene-genesis",
+        handler=handler,
+        bedrock_model=MODEL_ARN,
+        manifest_loader=loader,
+        genesis_s3_client=genesis_s3,
+        sts_client=sts,
+        session_factory=lambda **_: session,
+        clock=lambda: next(times),
+    )
+    return result, events, worker_s3, sts, genesis_s3
+
+
+def test_run_scene_from_genesis_derives_prompt_read_and_write_scope() -> None:
+    contexts: list[SceneContext] = []
+
+    def handler(
+        inputs: Mapping[str, Any], session: FakeSession, context: SceneContext
+    ) -> SceneHandlerResult:
+        contexts.append(context)
+        session.events.append("handler")
+        assert list(inputs) == ["input/prompt.txt"]
+        return SceneHandlerResult({"result/answer.txt": "Hello."}, {"source": "genesis"})
+
+    result, events, worker_s3, sts, genesis_s3 = _execute_genesis(handler)
+
+    assert events.count("genesis-load") == 1
+    assert events.index("genesis-load") < events.index("mint") < events.index("handler")
+    assert contexts[0].control_prompt == "Follow the sealed instructions."
+    assert [request["Key"] for request in genesis_s3.requests] == [
+        "genesis/README.md",
+        "genesis/outputs.json",
+    ]
+    assert worker_s3.get_requests == [
+        {"Bucket": "input-bucket", "Key": "sealed/prompt.txt", "VersionId": "input-version"}
+    ]
+    policy = json.loads(sts.requests[0]["Policy"])
+    write = policy["Statement"][-1]["Resource"]
+    assert "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write
+    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write
+    assert result.output_package.name == "project/scene-output"
+
+
+def test_genesis_write_scope_rejects_handler_output_before_publication() -> None:
+    events: list[str] = []
+    loader, genesis_s3 = _genesis_loader(events)
+    worker_s3 = FakeS3(events)
+    session = FakeSession(events, worker_s3)
+    with pytest.raises(HandlerContractError, match="outside the genesis write scope"):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: SceneHandlerResult({"other/answer.txt": "no"}, {}),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=loader,
+            genesis_s3_client=genesis_s3,
+            sts_client=FakeSTS(events),
+            session_factory=lambda **_: session,
+        )
+    assert not worker_s3.put_requests
+
+
+@pytest.mark.parametrize(
+    ("objects", "message"),
+    [
+        ((), "missing required"),
+        (
+            (
+                ManifestObject("README.md", "bucket-name", "readme"),
+                ManifestObject("outputs.json", "bucket-name", "outputs"),
+            ),
+            "input/",
+        ),
+        (
+            (
+                ManifestObject("README.md", "bucket-name", "one"),
+                ManifestObject("README.md", "bucket-name", "two"),
+            ),
+            "duplicate",
+        ),
+    ],
+)
+def test_genesis_rejects_incomplete_or_duplicate_layouts(
+    objects: Sequence[ManifestObject], message: str
+) -> None:
+    with pytest.raises(ManifestLoadError, match=message):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: SceneHandlerResult({"result/a": "x"}, {}),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=lambda _: objects,
+        )
+
+
+@pytest.mark.parametrize("outputs", [b"not json", b"[]"])
+def test_genesis_rejects_invalid_outputs_json(outputs: bytes) -> None:
+    events: list[str] = []
+    loader, genesis_s3 = _genesis_loader(events, outputs=outputs)
+    with pytest.raises(InvalidScopeError, match="outputs.json"):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: SceneHandlerResult({"result/a": "x"}, {}),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=loader,
+            genesis_s3_client=genesis_s3,
         )

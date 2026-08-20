@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .errors import InvalidManifestURI, InvalidScopeError, ManifestLoadError
-from .models import ManifestObject, OutputPackage, PinnedManifestURI
+from .models import (
+    ManifestObject,
+    OutputPackage,
+    OutputSelector,
+    PinnedManifestURI,
+    WriteSelectorKind,
+)
 
 _BUCKET_RE = re.compile(
     r"^(?!\d+\.\d+\.\d+\.\d+$)(?!.*\.\.)(?!.*\.-)(?!.*-\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
@@ -16,6 +22,8 @@ _BUCKET_RE = re.compile(
 _HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _PACKAGE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _FORBIDDEN_RESOURCE_CHARS = frozenset("*?")
+_MALFORMED_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_RESERVED_OUTPUT_KEYS = frozenset({"run/scene.json", "run/invocation.json"})
 
 ManifestLoader = Callable[[PinnedManifestURI], Sequence[ManifestObject]]
 
@@ -88,6 +96,109 @@ def parse_output_package(value: object) -> OutputPackage:
     _validate_package_name(name, error_type=InvalidScopeError)
     _validate_bucket(bucket, error_type=InvalidScopeError)
     return OutputPackage(name=name, bucket=bucket)
+
+
+def _parse_output_selector(uri: str, description: str) -> OutputSelector:
+    parsed = urlsplit(uri)
+    if parsed.scheme != "quilt+s3" or not parsed.hostname:
+        raise InvalidScopeError("writable URI must use quilt+s3:// with a bucket")
+    try:
+        has_authority_extras = bool(parsed.username or parsed.password or parsed.port)
+    except ValueError as error:
+        raise InvalidScopeError(f"invalid writable URI authority: {error}") from error
+    if has_authority_extras or parsed.query:
+        raise InvalidScopeError("writable URI must not contain credentials, a port, or a query")
+
+    _validate_bucket(parsed.hostname, error_type=InvalidScopeError)
+    try:
+        values = parse_qs(parsed.fragment, keep_blank_values=True, strict_parsing=True)
+    except ValueError as error:
+        raise InvalidScopeError(f"invalid writable URI fragment: {error}") from error
+    if set(values) != {"package"} or len(values["package"]) != 1:
+        raise InvalidScopeError("writable URI fragment must contain exactly one unpinned package")
+    package_name = values["package"][0]
+    _validate_package_name(package_name, error_type=InvalidScopeError)
+
+    if _MALFORMED_PERCENT_RE.search(parsed.path):
+        raise InvalidScopeError(f"writable URI contains malformed percent encoding: {uri!r}")
+    try:
+        decoded_path = unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError as error:
+        raise InvalidScopeError(f"writable URI path is not valid UTF-8: {uri!r}") from error
+
+    kind: WriteSelectorKind
+    if decoded_path in {"", "/"}:
+        path = ""
+        kind = "package"
+    else:
+        path = decoded_path.removeprefix("/")
+        if (
+            not path
+            or path.startswith("/")
+            or "\\" in path
+            or "${" in path
+            or any(character in path for character in _FORBIDDEN_RESOURCE_CHARS)
+            or any(ord(character) < 0x20 or ord(character) > 0xFF for character in path)
+            or any(part in {"", ".", ".."} for part in path.rstrip("/").split("/"))
+        ):
+            raise InvalidScopeError(f"unsafe writable URI path: {decoded_path!r}")
+        kind = "subtree" if path.endswith("/") else "object"
+        if kind == "object" and path in _RESERVED_OUTPUT_KEYS:
+            raise InvalidScopeError(f"writable URI selects reserved output key: {path!r}")
+        if kind == "subtree" and any(key.startswith(path) for key in _RESERVED_OUTPUT_KEYS):
+            raise InvalidScopeError(
+                f"writable URI subtree contains a reserved output key: {path!r}"
+            )
+
+    return OutputSelector(
+        bucket=parsed.hostname,
+        package_name=package_name,
+        path=path,
+        kind=kind,
+        original=uri,
+        description=description,
+    )
+
+
+def _selectors_overlap(left: OutputSelector, right: OutputSelector) -> bool:
+    if (left.bucket, left.package_name) != (right.bucket, right.package_name):
+        return False
+    if left.kind == "package" or right.kind == "package":
+        return True
+    if left.kind == "object" and right.kind == "object":
+        return left.path == right.path
+    if left.kind == "subtree":
+        return right.path.startswith(left.path)
+    return left.path.startswith(right.path)
+
+
+def parse_output_selectors(value: object) -> tuple[OutputSelector, ...]:
+    """Parse ``{unpinned quilt+ URI: description}`` into non-overlapping grants."""
+    if not isinstance(value, Mapping) or not value:
+        raise InvalidScopeError("writable must be a non-empty URI-to-description mapping")
+
+    selectors: list[OutputSelector] = []
+    for uri, description in value.items():
+        if not isinstance(uri, str) or not uri:
+            raise InvalidScopeError("each writable URI must be a non-empty string")
+        if not isinstance(description, str) or not description.strip():
+            raise InvalidScopeError("each writable description must be a non-empty string")
+        selector = _parse_output_selector(uri, description)
+        if selectors and (selector.bucket, selector.package_name) != (
+            selectors[0].bucket,
+            selectors[0].package_name,
+        ):
+            raise InvalidScopeError("all writable selectors must target one output package")
+        overlap = next(
+            (existing for existing in selectors if _selectors_overlap(existing, selector)),
+            None,
+        )
+        if overlap is not None:
+            raise InvalidScopeError(
+                f"overlapping writable selectors are ambiguous: {overlap.original!r} and {uri!r}"
+            )
+        selectors.append(selector)
+    return tuple(sorted(selectors, key=lambda item: (item.path, item.kind, item.original)))
 
 
 def _validate_physical_key(key: str) -> None:

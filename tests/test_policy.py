@@ -408,3 +408,57 @@ def test_compiled_policy_preserves_legacy_positional_warnings(manifest_loader) -
 
     assert legacy.warnings == ("legacy warning",)
     assert legacy.bedrock_model_arn is None
+
+
+def test_compile_accepts_narrow_uri_write_selectors(manifest_loader) -> None:
+    writable = {
+        "quilt+s3://output-bucket/results/#package=project%2Fscene-output": "result tree",
+        "quilt+s3://output-bucket/summary.json#package=project%2Fscene-output": "summary",
+    }
+    result = compile(
+        MANIFEST_URI,
+        {
+            "readable": ["input-content/data.csv"],
+            "writable": writable,
+            "require_version_ids": True,
+        },
+        manifest_loader=manifest_loader,
+    )
+
+    expected_data = [
+        "arn:aws:s3:::output-bucket/project/scene-output/results/*",
+        "arn:aws:s3:::output-bucket/project/scene-output/summary.json",
+        "arn:aws:s3:::output-bucket/project/scene-output/run/invocation.json",
+        "arn:aws:s3:::output-bucket/project/scene-output/run/scene.json",
+    ]
+    assert list(result.output_package.resources) == [
+        *expected_data,
+        "arn:aws:s3:::output-bucket/.quilt/packages/*",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/*",
+    ]
+    write_boundary = result.document["Statement"][2]
+    assert write_boundary["NotResource"] == list(result.output_package.resources)
+    assert result.document["Statement"][-1]["Resource"] == list(result.output_package.resources)
+    assert [item["kind"] for item in result.report()["writable_selectors"]] == [
+        "subtree",
+        "object",
+    ]
+
+
+def test_compile_rejects_missing_or_competing_write_grammars(manifest_loader) -> None:
+    with pytest.raises(InvalidScopeError, match="exactly one"):
+        compile(
+            MANIFEST_URI,
+            {"readable": ["input-content/data.csv"]},
+            manifest_loader=manifest_loader,
+        )
+    with pytest.raises(InvalidScopeError, match="exactly one"):
+        compile(
+            MANIFEST_URI,
+            {
+                "readable": ["input-content/data.csv"],
+                "writable_package": "project/output@output-bucket",
+                "writable": {"quilt+s3://output-bucket#package=project%2Foutput": "all"},
+            },
+            manifest_loader=manifest_loader,
+        )

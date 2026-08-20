@@ -10,17 +10,25 @@ from os.path import commonprefix
 from typing import Any
 
 from .errors import InvalidScopeError, PolicySizeError
-from .manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri, parse_output_package
-from .models import CompiledPolicy, ManifestObject, OutputPackage, PolicyMode
+from .manifest import (
+    ManifestLoader,
+    load_quilt_manifest,
+    parse_manifest_uri,
+    parse_output_package,
+    parse_output_selectors,
+)
+from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector, PolicyMode
 
 DEFAULT_MAX_POLICY_CHARACTERS = 2048
 _ALLOWED_SCOPE_KEYS = {
     "readable",
     "writable_package",
+    "writable",
     "bedrock_model",
     "allow_prefix_fallback",
     "require_version_ids",
 }
+_RUNTIME_OUTPUT_KEYS = frozenset({"run/scene.json", "run/invocation.json"})
 _BEDROCK_MODEL_RE = re.compile(
     r"^arn:aws:bedrock:(?P<region>[a-z]{2}-[a-z]+-\d+):"
     r":foundation-model/[A-Za-z0-9][A-Za-z0-9._:-]*$"
@@ -58,6 +66,30 @@ def _parse_bedrock_model(value: object) -> str | None:
             "bedrock_model must be one exact commercial-partition foundation-model ARN"
         )
     return value
+
+
+def _parse_output_scope(
+    scope: Mapping[str, object],
+) -> tuple[OutputPackage, tuple[OutputSelector, ...]]:
+    has_legacy = "writable_package" in scope
+    has_selectors = "writable" in scope
+    if has_legacy == has_selectors:
+        raise InvalidScopeError("scope must contain exactly one of writable_package or writable")
+    if has_legacy:
+        return parse_output_package(scope["writable_package"]), ()
+
+    selectors = parse_output_selectors(scope["writable"])
+    first = selectors[0]
+    data_resources = [selector.data_resource for selector in selectors]
+    if not any(selector.kind == "package" for selector in selectors):
+        root = f"arn:aws:s3:::{first.bucket}/{first.package_name}/"
+        data_resources.extend(f"{root}{key}" for key in sorted(_RUNTIME_OUTPUT_KEYS))
+    output = OutputPackage(
+        name=first.package_name,
+        bucket=first.bucket,
+        data_write_resources=tuple(_deduplicate(data_resources)),
+    )
+    return output, selectors
 
 
 def _resolve_selectors(
@@ -251,7 +283,7 @@ def compile(
 
     manifest = parse_manifest_uri(manifest_uri)
     selectors = _parse_readable(scope_spec.get("readable"))
-    output = parse_output_package(scope_spec.get("writable_package"))
+    output, writable_selectors = _parse_output_scope(scope_spec)
     bedrock_model_arn = _parse_bedrock_model(scope_spec.get("bedrock_model"))
     allow_prefix_fallback = _parse_boolean(scope_spec, "allow_prefix_fallback")
     require_version_ids = _parse_boolean(scope_spec, "require_version_ids")
@@ -331,4 +363,5 @@ def compile(
         output_package=output,
         bedrock_model_arn=bedrock_model_arn,
         warnings=warnings,
+        writable_selectors=writable_selectors,
     )
