@@ -43,3 +43,7 @@ class HandlerContractError(RajaStsError, ValueError):
 
 class PublicationError(RajaStsError):
     """The bounded output package could not be published."""
+
+
+class WorkflowContractError(RajaStsError):
+    """The output package does not satisfy the destination registry's workflow contract."""

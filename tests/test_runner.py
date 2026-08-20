@@ -30,6 +30,12 @@ ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution"
 CONTENT = b"Tell me hello."
 
 
+class _NoWorkflowsConfig(Exception):
+    def __init__(self) -> None:
+        super().__init__("NoSuchKey")
+        self.response = {"Error": {"Code": "NoSuchKey"}}
+
+
 class Body(io.BytesIO):
     was_closed = False
 
@@ -57,6 +63,8 @@ class FakeS3:
         self.body: Body | None = None
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        if str(kwargs.get("Key", "")).startswith(".quilt/workflows/"):
+            raise _NoWorkflowsConfig()
         self.events.append("get")
         self.get_requests.append(kwargs)
         self.body = Body(self.content) if isinstance(self.content, bytes) else self.content  # type: ignore[assignment]
@@ -172,6 +180,7 @@ def _execute(
     s3: FakeS3 | None = None,
     scope: dict[str, object] | None = None,
     clock: Callable[[], datetime] | None = None,
+    **run_scene_kwargs: Any,
 ) -> tuple[Any, list[str], FakeS3, FakeSTS, FakeSession, dict[str, Any]]:
     events: list[str] = []
     fake_s3 = s3 or FakeS3(events)
@@ -201,6 +210,7 @@ def _execute(
         sts_client=sts,
         session_factory=session_factory,
         clock=clock or (lambda: next(times)),
+        **run_scene_kwargs,
     )
     return result, events, fake_s3, sts, session, session_kwargs
 
@@ -605,3 +615,22 @@ def test_genesis_rejects_invalid_outputs_json(outputs: bytes) -> None:
             manifest_loader=loader,
             genesis_s3_client=genesis_s3,
         )
+
+
+def test_run_scene_threads_output_meta_message_into_manifest_header() -> None:
+    result, _events, fake_s3, _sts, _session, _kwargs = _execute(
+        handler=lambda inputs, session, context: SceneHandlerResult(
+            objects={"out.txt": b"ok"}, invocation={"model": "m"}
+        ),
+        output_meta={"trial": 1, "limitations": "offline test"},
+        output_message="threaded through",
+    )
+    manifest_put = next(
+        request
+        for request in fake_s3.put_requests
+        if request["Key"] == f".quilt/packages/{result.top_hash}"
+    )
+    header = json.loads(manifest_put["Body"].decode().splitlines()[0])
+    assert header["user_meta"] == {"trial": 1, "limitations": "offline test"}
+    assert header["message"] == "threaded through"
+    assert "workflow" not in header

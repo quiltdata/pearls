@@ -12,6 +12,7 @@ from .errors import (
     PolicySizeError,
     PublicationError,
     RajaStsError,
+    WorkflowContractError,
 )
 from .models import CompiledPolicy, ManifestObject, OutputSelector, ScopedCredentials
 from .policy import compile
@@ -25,6 +26,7 @@ from .runner import (
     run_scene_from_genesis,
 )
 from .sts import mint, mint_compiled
+from .workflows import resolve_workflow_stamp
 
 __all__ = [
     "AuthorityModeError",
@@ -47,11 +49,13 @@ __all__ = [
     "SceneHandlerResult",
     "SceneRunResult",
     "ScopedCredentials",
+    "WorkflowContractError",
     "compile",
     "mint",
     "mint_compiled",
+    "resolve_workflow_stamp",
     "run_scene",
     "run_scene_from_genesis",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

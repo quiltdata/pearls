@@ -303,6 +303,37 @@ Because a session policy can only narrow its base role, the agent cannot add
 authority during the session. Promotion of output into a later Scene's inputs
 remains separately authorized.
 
+### Workflow contracts on output registries
+
+Governed buckets register Quilt workflows (`.quilt/workflows/config.yml`) and
+can require every package to name one and satisfy its JSON Schemas. Publication
+honors that contract with quilt3 semantics, using only the caller-supplied S3
+client (a scoped Scene session validates against exactly the registry its
+credentials can see):
+
+- `workflow=...` (default) resolves the registry's `default_workflow` and
+  respects `is_workflow_required` (true by default when a config exists);
+  `workflow=None` opts out explicitly and is refused when required; a named
+  workflow must exist in the config.
+- Package `user_meta` is validated against the workflow's `metadata_schema`,
+  the entry list against its `entries_schema`, the commit `message` against
+  `is_message_required`, and the package name against `handle_pattern`.
+- Validation happens **before any write**; a refusal raises
+  `WorkflowContractError` and leaves nothing behind — a refusal transcript is
+  evidence.
+- A conforming publication stamps `{id, config, schemas}` (S3 URIs with
+  version IDs) into the manifest header exactly as quilt3 writes it, so
+  catalogs and `quilt3` read the package as having passed the contract it
+  actually passed.
+- Schema documents must be reachable by the publishing credentials; under a
+  Scene session that means the output registry's own `.quilt/workflows/*`
+  prefix (already part of the compiled read scope). `$ref` is rejected and
+  only draft-07 meta-schemas are supported, for parity with quilt3's
+  validator.
+
+`run_scene` and `run_scene_from_genesis` expose these as `output_meta`,
+`output_message`, and `output_workflow`.
+
 ### Policy-size behavior
 
 STS limits an inline session policy to 2,048 plaintext characters. Exact mode

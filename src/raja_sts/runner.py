@@ -240,6 +240,9 @@ def _execute_compiled_scene(
     session_factory: Callable[..., Any],
     clock: Callable[[], datetime],
     control_prompt: str | None = None,
+    output_meta: Mapping[str, Any] | None = None,
+    output_message: str | None = None,
+    output_workflow: str | None | object = ...,
 ) -> SceneRunResult:
     _validate_runner_authority(compilation)
     credentials = mint_compiled(
@@ -312,6 +315,9 @@ def _execute_compiled_scene(
         output=compilation.output_package,
         objects=objects,
         timestamp=completed_at,
+        user_meta=output_meta,
+        message=output_message,
+        workflow=output_workflow,
     )
     return SceneRunResult(
         scene_id=scene_id,
@@ -337,8 +343,17 @@ def run_scene(
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
     session_factory: Callable[..., Any] = boto3.Session,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    output_meta: Mapping[str, Any] | None = None,
+    output_message: str | None = None,
+    output_workflow: str | None | object = ...,
 ) -> SceneRunResult:
-    """Compile, mint, execute, and publish exactly one bounded Scene."""
+    """Compile, mint, execute, and publish exactly one bounded Scene.
+
+    ``output_meta``, ``output_message``, and ``output_workflow`` are applied to
+    the published output package and validated against the destination
+    registry's workflow contract before anything is written (see
+    :func:`raja_sts.publication.publish_package`).
+    """
     started_at = clock()
     compilation = compile(
         manifest_uri,
@@ -357,6 +372,9 @@ def run_scene(
         sts_client=sts_client,
         session_factory=session_factory,
         clock=clock,
+        output_meta=output_meta,
+        output_message=output_message,
+        output_workflow=output_workflow,
     )
 
 
@@ -409,8 +427,16 @@ def run_scene_from_genesis(
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
     session_factory: Callable[..., Any] = boto3.Session,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    output_meta: Mapping[str, Any] | None = None,
+    output_message: str | None = None,
+    output_workflow: str | None | object = ...,
 ) -> SceneRunResult:
-    """Boot one Scene from a pinned genesis package and its immutable controls."""
+    """Boot one Scene from a pinned genesis package and its immutable controls.
+
+    ``output_meta``, ``output_message``, and ``output_workflow`` are applied to
+    the published output package and validated against the destination
+    registry's workflow contract before anything is written.
+    """
     started_at = clock()
     genesis = parse_manifest_uri(genesis_uri)
     loader = manifest_loader or load_quilt_manifest
@@ -445,4 +471,7 @@ def run_scene_from_genesis(
         session_factory=session_factory,
         clock=clock,
         control_prompt=control_prompt,
+        output_meta=output_meta,
+        output_message=output_message,
+        output_workflow=output_workflow,
     )
