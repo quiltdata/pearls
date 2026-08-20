@@ -4,6 +4,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.3] - 2026-08-20
+
+### Added
+
+- Publication now honors the destination registry's Quilt **workflow
+  contract** with quilt3 semantics, validated client-side through the one
+  caller-supplied S3 client before anything is written: default-workflow
+  resolution, `is_workflow_required` (default true when a config exists),
+  metadata and entries JSON Schemas, `is_message_required`, and
+  `handle_pattern`. A conforming publication stamps the workflow (config and
+  schema URIs with version IDs) into the manifest header exactly as quilt3
+  does; a nonconforming one raises `WorkflowContractError` and leaves no
+  partial writes.
+- Contract objects must themselves be versioned: a workflow config or schema
+  with no S3 version ID is refused, so the manifest stamp always pins the
+  exact contract that was validated (stricter than quilt3, refuse-only).
+- `publish_package`, `run_scene`, and `run_scene_from_genesis` accept
+  package-level `user_meta` / `output_meta`, a commit `message` /
+  `output_message`, and a `workflow` / `output_workflow` selector, so Scene
+  outputs can enter governed buckets whose schemas require declared metadata.
+
 ## [0.1.2] - 2026-08-19
 
 ### Added

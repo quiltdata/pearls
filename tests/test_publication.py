@@ -12,7 +12,7 @@ from quilt3 import Package
 from quilt3.telemetry import ApiTelemetry
 from quilt3.util import QuiltException
 
-from raja_sts import PublicationError
+from raja_sts import PublicationError, WorkflowContractError
 from raja_sts.models import OutputPackage
 from raja_sts.publication import publish_package
 
@@ -34,6 +34,13 @@ class RecordingS3:
     def get_bucket_versioning(self, **kwargs: Any) -> dict[str, str]:
         self.versioning_requests.append(kwargs)
         return {"Status": self.versioning_status} if self.versioning_status else {}
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        error = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "absent"}},
+            "GetObject",
+        )
+        raise error
 
     def put_object(self, **kwargs: Any) -> dict[str, Any]:
         self.requests.append(kwargs)
@@ -207,6 +214,12 @@ def test_every_publication_write_must_return_a_version_id(
 
 def test_publish_package_wraps_write_failures() -> None:
     class BrokenS3:
+        def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": "absent"}},
+                "GetObject",
+            )
+
         def get_bucket_versioning(self, **kwargs: Any) -> dict[str, str]:
             return {"Status": "Enabled"}
 
@@ -221,3 +234,171 @@ def test_publish_package_wraps_write_failures() -> None:
             timestamp=datetime.now(UTC),
         )
     assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+GOVERNED_CONFIG = b"""
+version: "1"
+is_workflow_required: true
+default_workflow: trial-run
+workflows:
+  trial-run:
+    metadata_schema: trial-run-v1
+    is_message_required: true
+schemas:
+  trial-run-v1:
+    url: s3://output-bucket/.quilt/workflows/trial-run-v1.json
+"""
+
+GOVERNED_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "required": ["trial"],
+        "properties": {"trial": {"type": "integer"}},
+    }
+).encode()
+
+
+class _ConfigBody:
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    def read(self) -> bytes:
+        return self._content
+
+    def close(self) -> None:
+        return None
+
+
+class GovernedS3(RecordingS3):
+    """RecordingS3 plus a workflow config and one metadata schema."""
+
+    workflow_objects = {
+        ".quilt/workflows/config.yml": (GOVERNED_CONFIG, "config-v1"),
+        ".quilt/workflows/trial-run-v1.json": (GOVERNED_SCHEMA, "schema-v1"),
+    }
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        entry = self.workflow_objects.get(kwargs["Key"])
+        if entry is None:
+            return super().get_object(**kwargs)
+        content, version = entry
+        return {"Body": _ConfigBody(content), "VersionId": version}
+
+
+def test_publish_into_governed_bucket_validates_and_stamps() -> None:
+    s3 = GovernedS3()
+    output = OutputPackage("trials/trial001", "output-bucket")
+    top_hash = publish_package(
+        s3_client=s3,
+        output=output,
+        objects={"content/observations.csv": b"a,b\n"},
+        timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        user_meta={"trial": 1},
+        message="scene-native run",
+    )
+
+    manifest_request = next(
+        request for request in s3.requests if request["Key"] == f".quilt/packages/{top_hash}"
+    )
+    header = json.loads(manifest_request["Body"].decode().splitlines()[0])
+    assert header["user_meta"] == {"trial": 1}
+    assert header["message"] == "scene-native run"
+    assert header["workflow"] == {
+        "id": "trial-run",
+        "config": "s3://output-bucket/.quilt/workflows/config.yml?versionId=config-v1",
+        "schemas": {
+            "trial-run-v1": (
+                "s3://output-bucket/.quilt/workflows/trial-run-v1.json?versionId=schema-v1"
+            )
+        },
+    }
+
+    # Round-trip identity: a package rebuilt from the manifest recomputes the
+    # same top hash, so the stamped metadata participates in the identity.
+    import io as _io
+
+    from quilt3 import Package as _Package
+
+    rebuilt = _Package.load(_io.BytesIO(manifest_request["Body"]))
+    assert rebuilt.top_hash == top_hash
+
+
+def test_governed_refusal_happens_before_any_write() -> None:
+    s3 = GovernedS3()
+    output = OutputPackage("trials/trial001", "output-bucket")
+    with pytest.raises(WorkflowContractError, match="Package metadata failed validation"):
+        publish_package(
+            s3_client=s3,
+            output=output,
+            objects={"content/observations.csv": b"a,b\n"},
+            timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+            user_meta={},
+            message="scene-native run",
+        )
+    assert s3.requests == []
+
+
+def test_governed_bucket_refuses_explicit_no_workflow() -> None:
+    s3 = GovernedS3()
+    output = OutputPackage("trials/trial001", "output-bucket")
+    with pytest.raises(WorkflowContractError, match="Workflow required, but none specified."):
+        publish_package(
+            s3_client=s3,
+            output=output,
+            objects={"content/observations.csv": b"a,b\n"},
+            timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+            user_meta={"trial": 1},
+            message="scene-native run",
+            workflow=None,
+        )
+    assert s3.requests == []
+
+
+def test_governed_bucket_requires_message_when_workflow_says_so() -> None:
+    s3 = GovernedS3()
+    output = OutputPackage("trials/trial001", "output-bucket")
+    with pytest.raises(WorkflowContractError, match="Commit message is required"):
+        publish_package(
+            s3_client=s3,
+            output=output,
+            objects={"content/observations.csv": b"a,b\n"},
+            timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+            user_meta={"trial": 1},
+        )
+    assert s3.requests == []
+
+
+def test_non_serializable_user_meta_is_refused_before_writes() -> None:
+    s3 = RecordingS3()
+    output = OutputPackage("project/output", "output-bucket")
+    with pytest.raises(PublicationError, match="JSON-serializable"):
+        publish_package(
+            s3_client=s3,
+            output=output,
+            objects={"z.txt": b"z"},
+            timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+            user_meta={"bad": object()},
+        )
+    assert s3.requests == []
+
+
+def test_ungoverned_bucket_still_publishes_with_meta_and_message() -> None:
+    s3 = RecordingS3(
+        [{"VersionId": "v1"}, {"VersionId": "v2"}, {"VersionId": "v3"}, {"VersionId": "v4"}]
+    )
+    output = OutputPackage("project/output", "output-bucket")
+    top_hash = publish_package(
+        s3_client=s3,
+        output=output,
+        objects={"z.txt": b"z"},
+        timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        user_meta={"note": "ungoverned"},
+        message="still recorded",
+    )
+    manifest_request = next(
+        request for request in s3.requests if request["Key"] == f".quilt/packages/{top_hash}"
+    )
+    header = json.loads(manifest_request["Body"].decode().splitlines()[0])
+    assert header["user_meta"] == {"note": "ungoverned"}
+    assert header["message"] == "still recorded"
+    assert "workflow" not in header

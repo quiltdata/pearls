@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -11,8 +12,9 @@ from quilt3 import Package, checksums
 from quilt3.packages import PackageEntry
 from quilt3.util import PhysicalKey
 
-from .errors import PublicationError
+from .errors import PublicationError, WorkflowContractError
 from .models import OutputPackage
+from .workflows import resolve_workflow_stamp
 
 
 def _put_versioned(s3_client: Any, **request: Any) -> str:
@@ -29,8 +31,21 @@ def publish_package(
     output: OutputPackage,
     objects: Mapping[str, bytes],
     timestamp: datetime,
+    user_meta: Mapping[str, Any] | None = None,
+    message: str | None = None,
+    workflow: str | None | object = ...,
 ) -> str:
     """Publish a Quilt v1 package to a versioned bucket without listing.
+
+    The destination registry's workflow contract is honored with quilt3
+    semantics before anything is written: ``workflow=...`` (the default)
+    resolves the registry's default workflow and respects
+    ``is_workflow_required``; ``workflow=None`` explicitly opts out and is
+    refused when the registry requires one; a named workflow must exist.
+    Metadata, entries, message, and package-name requirements are validated
+    client-side against the registry's schemas, and the resulting workflow
+    stamp is written into the manifest header exactly as quilt3 writes it.
+    A contract refusal raises :class:`WorkflowContractError` before any write.
 
     Bucket versioning is checked before the first write and every write must
     return a version ID. Data objects are written first, followed by Quilt's
@@ -41,6 +56,31 @@ def publish_package(
         versioning = s3_client.get_bucket_versioning(Bucket=output.bucket)
         if versioning.get("Status") != "Enabled":
             raise PublicationError(f"Output bucket {output.bucket!r} must have versioning enabled")
+
+        if user_meta is not None and not isinstance(user_meta, Mapping):
+            raise PublicationError("user_meta must be a mapping")
+        meta = dict(user_meta) if user_meta else {}
+        try:
+            json.dumps(meta, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise PublicationError(
+                f"Package metadata must be JSON-serializable: {error}"
+            ) from error
+        if message is not None and not isinstance(message, str):
+            raise PublicationError("message must be a string")
+
+        stamp = resolve_workflow_stamp(
+            s3_client=s3_client,
+            bucket=output.bucket,
+            package_name=output.name,
+            workflow=workflow,
+            user_meta=meta,
+            entries=[
+                {"logical_key": key, "size": len(objects[key]), "meta": {}}
+                for key in sorted(objects)
+            ],
+            message=message,
+        )
 
         package = Package()
         for logical_key in sorted(objects):
@@ -64,6 +104,15 @@ def publish_package(
                     {},
                 ),
             )
+
+        if meta:
+            package.set_meta(meta)
+        if message is not None:
+            package._meta["message"] = message
+        if stamp is not None:
+            # The workflow stamp participates in the top hash and the manifest
+            # header, exactly as quilt3's push writes it.
+            package._workflow = stamp
 
         top_hash = package.top_hash
         if not isinstance(top_hash, str):
@@ -97,7 +146,7 @@ def publish_package(
             IfNoneMatch="*",
         )
         return top_hash
-    except PublicationError:
+    except (PublicationError, WorkflowContractError):
         raise
     except Exception as error:
         raise PublicationError(f"Unable to publish bounded output package: {error}") from error
