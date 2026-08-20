@@ -20,8 +20,9 @@ from uuid import uuid4
 import boto3
 import pytest
 from botocore.exceptions import ClientError
+from quilt3 import Package
 
-from raja_sts import mint
+from raja_sts import SceneHandlerResult, mint, run_scene
 
 pytestmark = [
     pytest.mark.aws,
@@ -411,5 +412,141 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
                 "allowed",
                 {"bucket": bucket, "key": key, **_response_details(response)},
             )
+
+    assert transcript.exists()
+
+
+_RUNNER_REQUIRED_ENV = (
+    "RAJA_STS_MANIFEST_URI",
+    "RAJA_STS_RUNNER_SCOPE_FILE",
+    "RAJA_STS_ROLE_ARN",
+    "RAJA_STS_CLEANUP_ROLE_ARN",
+    "RAJA_STS_RUNNER_PROMPT_KEY",
+    "RAJA_STS_ALTERNATE_MODEL_ID",
+)
+
+
+def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
+    """Prove exact-model execution and no-list publication through run_scene()."""
+    missing = [name for name in _RUNNER_REQUIRED_ENV if not os.getenv(name)]
+    assert not missing, f"missing live runner proof configuration: {', '.join(missing)}"
+
+    scope = json.loads(Path(os.environ["RAJA_STS_RUNNER_SCOPE_FILE"]).read_text())
+    assert scope.get("bedrock_model"), "runner scope must select one exact Bedrock model"
+    base_package, output_bucket = scope["writable_package"].rsplit("@", 1)
+    token = uuid4().hex
+    package_name = f"{base_package}/runner-proof-{token}"
+    scope["writable_package"] = f"{package_name}@{output_bucket}"
+    scene_id = os.getenv("RAJA_STS_SCENE_ID", "raja-sts-proof") + "-runner"
+    transcript = Path(os.getenv("RAJA_STS_TRANSCRIPT", tmp_path / "aws-proof-transcript.jsonl"))
+
+    cleanup_kwargs, cleanup_assumed_role_arn = _assume_role(
+        os.environ["RAJA_STS_CLEANUP_ROLE_ARN"],
+        scene_id,
+        "cleanup",
+        os.getenv("RAJA_STS_CLEANUP_EXTERNAL_ID"),
+    )
+    cleanup_s3 = boto3.client("s3", **cleanup_kwargs)
+    result = None
+
+    def handler(inputs: dict[str, Any], session: Any, context: Any) -> SceneHandlerResult:
+        prompt_key = os.environ["RAJA_STS_RUNNER_PROMPT_KEY"]
+        prompt = inputs[prompt_key].content.decode("utf-8")
+        started_at = datetime.now(UTC).isoformat()
+        response = session.client("bedrock-runtime").converse(
+            modelId=context.bedrock_model_arn,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+        )
+        text = response["output"]["message"]["content"][0]["text"]
+        return SceneHandlerResult(
+            objects={"result/prompt.txt": prompt, "result/response.txt": text},
+            invocation={
+                "model_id": response.get("modelId", context.bedrock_model_arn),
+                "request_id": response["ResponseMetadata"].get("RequestId"),
+                "usage": response.get("usage"),
+                "stop_reason": response.get("stopReason"),
+                "started_at": started_at,
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+    try:
+        result = run_scene(
+            manifest_uri=os.environ["RAJA_STS_MANIFEST_URI"],
+            scope_spec=scope,
+            role_arn=os.environ["RAJA_STS_ROLE_ARN"],
+            scene_id=scene_id[:64],
+            handler=handler,
+            external_id=os.getenv("RAJA_STS_EXTERNAL_ID"),
+        )
+        package = Package.browse(
+            package_name,
+            registry=f"s3://{output_bucket}",
+            top_hash=result.top_hash,
+        )
+        assert package.top_hash == result.top_hash
+        assert {key for key, _ in package.walk()} >= {
+            "result/prompt.txt",
+            "result/response.txt",
+            "run/scene.json",
+            "run/invocation.json",
+        }
+        _record(
+            transcript,
+            "RunScene:exact-model-publication",
+            "allowed",
+            {
+                "scene_id": result.scene_id,
+                "assumed_role_arn": result.assumed_role_arn,
+                "output_package": package_name,
+                "top_hash": result.top_hash,
+            },
+        )
+
+        denial = mint(
+            os.environ["RAJA_STS_MANIFEST_URI"],
+            scope,
+            role_arn=os.environ["RAJA_STS_ROLE_ARN"],
+            scene_id=f"{scene_id}-alternate"[:64],
+            external_id=os.getenv("RAJA_STS_EXTERNAL_ID"),
+        )
+        denied_session = boto3.Session(
+            region_name=str(scope["bedrock_model"]).split(":", 5)[3],
+            **denial.boto3_kwargs(),
+        )
+        _expect_denied(
+            transcript,
+            "Converse:alternate-model",
+            denied_session.client("bedrock-runtime").converse,
+            modelId=os.environ["RAJA_STS_ALTERNATE_MODEL_ID"],
+            messages=[{"role": "user", "content": [{"text": "authorization proof"}]}],
+        )
+    finally:
+        prefixes = [
+            f"{package_name}/",
+            f".quilt/named_packages/{package_name}/",
+        ]
+        if result is not None:
+            prefixes.append(f".quilt/packages/{result.top_hash}")
+        for prefix in prefixes:
+            paginator = cleanup_s3.get_paginator("list_object_versions")
+            for page in paginator.paginate(Bucket=output_bucket, Prefix=prefix):
+                for version in page.get("Versions", []):
+                    response = cleanup_s3.delete_object(
+                        Bucket=output_bucket,
+                        Key=version["Key"],
+                        VersionId=version["VersionId"],
+                    )
+                    _record(
+                        transcript,
+                        "RunnerCleanup:DeleteObjectVersion",
+                        "allowed",
+                        {
+                            "cleanup_assumed_role_arn": cleanup_assumed_role_arn,
+                            "bucket": output_bucket,
+                            "key": version["Key"],
+                            **_response_details(response),
+                        },
+                    )
 
     assert transcript.exists()

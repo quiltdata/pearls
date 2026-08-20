@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.1] - 2026-08-19
+
+### Added
+
+- Added the public `run_scene()` bounded-execution primitive, which compiles a
+  pinned manifest once, mints one Scene-named STS session, materializes exact
+  selected object versions, invokes one caller handler, and publishes one
+  descendant Quilt Package.
+- Added exact `bedrock:InvokeModel` authority for one sealed foundation-model
+  ARN and a thin Hello Scene example that performs one Bedrock Converse call
+  through the scoped session.
+- Added standard `run/scene.json` and `run/invocation.json` records containing
+  non-secret authority, lineage, audit identity, invocation, and timestamp
+  metadata.
+- Added an explicit-session Quilt v1 publication adapter that writes output
+  data, an immutable manifest, and named pointers without bucket listing or
+  deletion, with a create-only conditional `latest` write performed last.
+
+### Security
+
+- The runner rejects prefix, mixed, unversioned, unhashed, and unsupported-hash
+  inputs. Every selected read sends its sealed S3 version ID and verifies the
+  manifest content hash before handler execution.
+- Input reads, handler SDK clients, and package publication share one explicit
+  `boto3.Session` built only from the minted temporary credential. Handler
+  outputs and JSON metadata are validated before any output write, and
+  credential-shaped metadata is rejected.
+- Bedrock authority admits only `bedrock:InvokeModel` on the exact model ARN;
+  alternate models and broad `bedrock:*` capabilities remain outside the
+  compiled policy.
+
+### Known limitations
+
+- V1 runs exactly one handler without retries, streaming, tools, task graphs,
+  cleanup, promotion, KMS integration, or generalized model-provider support.
+- Output lineage is declared in the execution record but is not a
+  cryptographic proof. Failed publication can leave immutable objects for
+  administrator lifecycle cleanup because Scene credentials cannot delete.
+
 ## [0.1.0] - 2026-08-19
 
 ### Added

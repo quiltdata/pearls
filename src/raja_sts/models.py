@@ -95,6 +95,7 @@ class CompiledPolicy:
     readable_selectors: tuple[str, ...]
     selected_objects: tuple[ManifestObject, ...]
     output_package: OutputPackage
+    bedrock_model_arn: str | None = None
     warnings: tuple[str, ...] = ()
 
     @property
@@ -120,6 +121,7 @@ class CompiledPolicy:
                 for item in self.selected_objects
             ],
             "writable_package": f"{self.output_package.name}@{self.output_package.bucket}",
+            "bedrock_model_arn": self.bedrock_model_arn,
             "warnings": list(self.warnings),
         }
 

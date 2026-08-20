@@ -323,3 +323,57 @@ def test_policy_limit_must_stay_within_the_aws_hard_limit(
             manifest_loader=manifest_loader,
             max_policy_characters=limit,  # type: ignore[arg-type]
         )
+
+
+MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+
+
+def test_compile_admits_only_one_exact_bedrock_model(manifest_loader) -> None:
+    result = compile(
+        MANIFEST_URI,
+        {
+            "readable": ["input-content/data.csv"],
+            "writable_package": "project/output@output-bucket",
+            "require_version_ids": True,
+            "bedrock_model": MODEL_ARN,
+        },
+        manifest_loader=manifest_loader,
+    )
+
+    statements = result.document["Statement"]
+    model_statements = [
+        statement for statement in statements if statement.get("Action") == "bedrock:InvokeModel"
+    ]
+    assert model_statements == [
+        {"Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": MODEL_ARN}
+    ]
+    assert result.bedrock_model_arn == MODEL_ARN
+    assert result.report()["bedrock_model_arn"] == MODEL_ARN
+    assert "bedrock:*" not in result.policy_json
+    assert "anthropic.claude" not in result.policy_json
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "*",
+        "arn:aws:bedrock:us-east-1::foundation-model/*",
+        "arn:aws-cn:bedrock:cn-north-1::foundation-model/example",
+        "arn:aws:bedrock:us-east-1:123456789012:custom-model/example",
+        "arn:aws:bedrock:us-east-1::inference-profile/example",
+        3,
+    ],
+)
+def test_compile_rejects_non_exact_or_unsupported_bedrock_resources(
+    manifest_loader, model: object
+) -> None:
+    with pytest.raises(InvalidScopeError, match="bedrock_model"):
+        compile(
+            MANIFEST_URI,
+            {
+                "readable": ["input-content/data.csv"],
+                "writable_package": "project/output@output-bucket",
+                "bedrock_model": model,
+            },
+            manifest_loader=manifest_loader,
+        )

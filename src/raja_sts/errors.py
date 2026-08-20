@@ -14,7 +14,7 @@ class ManifestLoadError(RajaStsError):
 
 
 class InvalidScopeError(RajaStsError, ValueError):
-    """The logical read or output scope is invalid."""
+    """The logical read, model, or output scope is invalid."""
 
 
 class PolicySizeError(RajaStsError):
@@ -27,3 +27,19 @@ class InvalidAssumeRoleRequest(RajaStsError, ValueError):
 
 class MintError(RajaStsError):
     """STS rejected the request or returned an invalid credential response."""
+
+
+class AuthorityModeError(RajaStsError):
+    """A Scene runner request does not have exact, version-pinned authority."""
+
+
+class InputIntegrityError(RajaStsError):
+    """A selected input could not be read or did not match its sealed digest."""
+
+
+class HandlerContractError(RajaStsError, ValueError):
+    """A Scene handler returned unsafe objects or non-serializable metadata."""
+
+
+class PublicationError(RajaStsError):
+    """The bounded output package could not be published."""

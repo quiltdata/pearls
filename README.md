@@ -78,7 +78,7 @@ The Pearls architecture distinguishes three levels of maturity:
    stress testing (deterministic Scene sealing, output-package creation
    semantics, domain-aware reconciliation).
 
-Release 0.1.0 adds an alpha maturity-level 1→2 authority-compilation
+Release 0.1.1 adds an alpha maturity-level 1→2 authority-compilation
 primitive: `raja_sts` compiles a pinned Quilt Package scope into an AWS STS
 session policy and temporary credentials. It is not a claim that the complete
 Pearls architecture is production-ready.
@@ -185,6 +185,48 @@ objects, output package, policy size, and any degraded guarantees. Secret
 credential fields are excluded from `repr`, but remain bearer secrets and
 must never be logged or committed.
 
+### Run one bounded Scene
+
+A sealed runner scope adds one exact Bedrock foundation-model ARN. The public
+runner compiles and mints once, reads and verifies only selected object
+versions, passes one explicit scoped session to the handler, and publishes a
+Quilt output Package without listing the bucket:
+
+```python
+from raja_sts import SceneHandlerResult, run_scene
+
+
+def handler(inputs, session, context):
+    prompt = inputs["input-content/prompt.txt"].content.decode()
+    response = session.client("bedrock-runtime").converse(
+        modelId=context.bedrock_model_arn,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+    )
+    return SceneHandlerResult(
+        objects={"result/response.txt": response["output"]["message"]["content"][0]["text"]},
+        invocation={"request_id": response["ResponseMetadata"]["RequestId"]},
+    )
+
+
+result = run_scene(
+    manifest_uri=manifest_uri,
+    scope_spec={
+        **scope,
+        "bedrock_model": "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0",
+    },
+    role_arn="arn:aws:iam::123456789012:role/scene-execution",
+    scene_id="scene-run-123",
+    handler=handler,
+)
+print(result.package_uri)
+```
+
+Handlers return bytes or strings plus JSON-serializable invocation metadata.
+The package always includes handler objects, `run/scene.json`, and
+`run/invocation.json`. See [`examples/hello_scene.py`](examples/hello_scene.py)
+for a thin one-Converse consumer. Prompt and response bodies remain explicit
+package objects rather than implicit metadata.
+
 ### Mapping to the four Scene roles
 
 | Scene role | AWS-native enforcement |
@@ -250,7 +292,7 @@ aws cloudformation deploy \
 
 Review the rendered IAM policy before deployment. The orchestrator needs
 `sts:AssumeRole` permission as well as the role's trust. The template targets
-the commercial `aws` partition in 0.1.0. `mint(external_id=...)` is available
+the commercial `aws` partition in 0.1.1. `mint(external_id=...)` is available
 for separately managed roles whose trust policy requires `sts:ExternalId`; the
 shipped same-account template does not require one. The worker must not be able
 to retrieve broader ambient task, instance, or execution-role credentials;
@@ -289,6 +331,10 @@ export RAJA_STS_WORKFLOW_READ='s3://output-bucket/.quilt/workflows/config.yml'
 export RAJA_STS_OUTPUT_LATEST_READ='s3://output-bucket/.quilt/named_packages/scenes/example/output/latest'
 export RAJA_STS_ALLOWED_WRITE='s3://output-bucket/scenes/example/output/proof.txt'
 export RAJA_STS_DENIED_WRITE='s3://output-bucket/outside-output/proof.txt'
+# Runner proof: use a scope with an exact bedrock_model and a disposable output package base.
+export RAJA_STS_RUNNER_SCOPE_FILE="$PWD/examples/scope.json"
+export RAJA_STS_RUNNER_PROMPT_KEY='input-content/prompt.txt'
+export RAJA_STS_ALTERNATE_MODEL_ID='arn:aws:bedrock:us-east-1::foundation-model/another-model'
 export RAJA_STS_TRANSCRIPT="$PWD/evidence/aws-taj/aws-proof-transcript.jsonl"
 pytest -m aws tests/aws/test_authorization.py
 ```
@@ -322,7 +368,7 @@ run.
   `s3:AbortMultipartUpload` is intentionally absent. Failed multipart uploads
   can leave billable incomplete parts; output buckets should configure an
   `AbortIncompleteMultipartUpload` lifecycle rule.
-- The compiler emits commercial-partition (`arn:aws`) S3 resources in 0.1.0
+- The compiler emits commercial-partition (`arn:aws`) S3 resources in 0.1.1
   and rejects GovCloud/China role ARNs rather than minting mismatched policy.
 - The compiler bounds a namespace; it does not prove that an output Package
   is a lineage descendant. Scene sealing/reconciliation must establish that

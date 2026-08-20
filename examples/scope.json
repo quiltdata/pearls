@@ -4,6 +4,7 @@
     "input-content/"
   ],
   "writable_package": "scenes/example/output@my-project-bucket",
+  "bedrock_model": "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0",
   "require_version_ids": true,
   "allow_prefix_fallback": false
 }
