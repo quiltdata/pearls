@@ -18,7 +18,18 @@ _ROLE_ARN_RE = re.compile(r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+$")
 _SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_+=,.@-]{2,64}$")
 
 
-def _validate_request(role_arn: str, scene_id: str, duration_seconds: int) -> None:
+def validate_assume_role_request(
+    *,
+    role_arn: str,
+    scene_id: str,
+    duration_seconds: int = 3600,
+    external_id: str | None = None,
+) -> None:
+    """Check every value that would be sent to ``sts:AssumeRole``.
+
+    Raises :class:`InvalidAssumeRoleRequest` without contacting AWS, so callers
+    can validate an operator's arguments before any network call.
+    """
     if not isinstance(role_arn, str) or not _ROLE_ARN_RE.fullmatch(role_arn):
         raise InvalidAssumeRoleRequest("role_arn must be a complete IAM role ARN")
     if not isinstance(scene_id, str) or not _SESSION_NAME_RE.fullmatch(scene_id):
@@ -27,6 +38,10 @@ def _validate_request(role_arn: str, scene_id: str, duration_seconds: int) -> No
         )
     if not isinstance(duration_seconds, int) or not 900 <= duration_seconds <= 43200:
         raise InvalidAssumeRoleRequest("duration_seconds must be between 900 and 43200")
+    if external_id is not None and (
+        not isinstance(external_id, str) or not 2 <= len(external_id) <= 1224
+    ):
+        raise InvalidAssumeRoleRequest("external_id must contain 2-1224 characters")
 
 
 def mint_compiled(
@@ -39,11 +54,12 @@ def mint_compiled(
     sts_client: Any | None = None,
 ) -> ScopedCredentials:
     """Attach a compiled policy to one STS role session and return its credentials."""
-    _validate_request(role_arn, scene_id, duration_seconds)
-    if external_id is not None and (
-        not isinstance(external_id, str) or not 2 <= len(external_id) <= 1224
-    ):
-        raise InvalidAssumeRoleRequest("external_id must contain 2-1224 characters")
+    validate_assume_role_request(
+        role_arn=role_arn,
+        scene_id=scene_id,
+        duration_seconds=duration_seconds,
+        external_id=external_id,
+    )
 
     request: dict[str, Any] = {
         "RoleArn": role_arn,

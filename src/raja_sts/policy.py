@@ -58,7 +58,8 @@ def _parse_boolean(scope: Mapping[str, object], key: str) -> bool:
     return value
 
 
-def _parse_bedrock_model(value: object) -> str | None:
+def parse_bedrock_model(value: object) -> str | None:
+    """Validate one exact commercial-partition foundation-model ARN, or ``None``."""
     if value is None:
         return None
     if not isinstance(value, str) or not _BEDROCK_MODEL_RE.fullmatch(value):
@@ -66,6 +67,16 @@ def _parse_bedrock_model(value: object) -> str | None:
             "bedrock_model must be one exact commercial-partition foundation-model ARN"
         )
     return value
+
+
+def bedrock_model_region(model_arn: str) -> str:
+    """Return the AWS region named by a validated foundation-model ARN."""
+    match = _BEDROCK_MODEL_RE.fullmatch(model_arn) if isinstance(model_arn, str) else None
+    if match is None:
+        raise InvalidScopeError(
+            "bedrock_model must be one exact commercial-partition foundation-model ARN"
+        )
+    return match.group("region")
 
 
 def _parse_output_scope(
@@ -284,7 +295,7 @@ def compile(
     manifest = parse_manifest_uri(manifest_uri)
     selectors = _parse_readable(scope_spec.get("readable"))
     output, writable_selectors = _parse_output_scope(scope_spec)
-    bedrock_model_arn = _parse_bedrock_model(scope_spec.get("bedrock_model"))
+    bedrock_model_arn = parse_bedrock_model(scope_spec.get("bedrock_model"))
     allow_prefix_fallback = _parse_boolean(scope_spec, "allow_prefix_fallback")
     require_version_ids = _parse_boolean(scope_spec, "require_version_ids")
 

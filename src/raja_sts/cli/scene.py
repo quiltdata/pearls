@@ -1,0 +1,474 @@
+"""``pearls scene`` — preflight and execute exactly one sealed-genesis Scene.
+
+Both verbs take the same arguments so that a passing ``check`` describes the run
+that ``run`` would perform. ``check`` performs only reads; ``run`` delegates to
+:func:`raja_sts.run_scene_from_genesis` exactly once and adds no authority,
+materialization, workflow, or publication logic of its own.
+"""
+
+from __future__ import annotations
+
+import argparse
+import secrets
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
+
+from ..manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
+from ..models import ManifestObject, PinnedManifestURI
+from ..policy import DEFAULT_MAX_POLICY_CHARACTERS, parse_bedrock_model
+from ..runner import SceneContext, SceneHandler, SceneHandlerResult
+from ..sealed import SEALED_HANDLER_KEY, SealedSource
+from ..sts import validate_assume_role_request
+from ._common import (
+    EXIT_OK,
+    SCENE_CHECK_SCHEMA,
+    SCENE_RUN_SCHEMA,
+    CliRefusal,
+    Emitter,
+    Runtime,
+    add_aws_arguments,
+    build_session,
+    envelope,
+    iso8601,
+    positive_int,
+    read_json_argument,
+    render_table,
+)
+
+_BOOTSTRAP = "trusted-bootstrap"
+_LOCAL = "local"
+_DEFAULT_WORKFLOW = "<registry default>"
+
+UNPROVEN_CONDITIONS: tuple[str, ...] = (
+    "Bedrock account-level access to the requested model cannot be proven without "
+    "invoking it; enabling model access stays a console prerequisite.",
+    "The base role's trust policy and permissions are not read here. Effective "
+    "authority is the intersection of the base role and this session policy, so a "
+    "base role admitting a different model fails closed at run time.",
+    "The output registry's Quilt workflow contract is validated at publication "
+    "with the Scene credential, not by this preflight.",
+    "Verifying the sealed handler's bytes proves code identity, not code safety. "
+    "This preflight does not execute them, so it also cannot prove the handler "
+    "imports cleanly or that its 'handler' binding is callable. During a run the "
+    "handler executes in-process as trusted code and receives the scoped session "
+    "that publication later uses.",
+    "quilt3 manifest retrieval does not verify downloaded manifest bytes against "
+    "the requested top hash (quiltdata/quilt#5181), so the genesis top hash is "
+    "provenance, not tamper enforcement.",
+)
+
+
+def _caching_loader(base: ManifestLoader | None) -> ManifestLoader:
+    """Resolve each pinned revision once for both the preflight and the handler."""
+    loader = base or load_quilt_manifest
+    cache: dict[str, tuple[ManifestObject, ...]] = {}
+
+    def load(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
+        cached = cache.get(manifest.top_hash)
+        if cached is None:
+            cached = tuple(loader(manifest))
+            cache[manifest.top_hash] = cached
+        return cached
+
+    return load
+
+
+def generate_scene_id(now: datetime) -> str:
+    """Return a collision-resistant Scene ID that is a valid RoleSessionName."""
+    stamp = now.astimezone(UTC).strftime("%Y%m%dT%H%M%S")
+    return f"scene-{stamp}Z-{secrets.token_hex(4)}"
+
+
+def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--genesis",
+        required=True,
+        metavar="URI",
+        help="top-hash-pinned genesis package, quilt+s3://BUCKET#package=NAME&top_hash=HASH",
+    )
+    parser.add_argument(
+        "--role-arn",
+        required=True,
+        metavar="ARN",
+        help="Scene execution role to assume for this run",
+    )
+    parser.add_argument(
+        "--model-arn",
+        required=True,
+        metavar="ARN",
+        help="exact Bedrock foundation-model ARN this Scene may invoke",
+    )
+    parser.add_argument("--scene-id", help="explicit Scene ID; generated when omitted")
+    parser.add_argument(
+        "--duration-seconds",
+        type=positive_int,
+        default=3600,
+        help="Scene credential lifetime, 900-43200 (default: 3600)",
+    )
+    parser.add_argument(
+        "--external-id",
+        help="sts:ExternalId required by a separately managed role's trust policy",
+    )
+    parser.add_argument(
+        "--handler-key",
+        default=SEALED_HANDLER_KEY,
+        metavar="LOGICAL_KEY",
+        help=f"sealed handler inside the genesis revision (default: {SEALED_HANDLER_KEY})",
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="JSON|@FILE",
+        help="output package user_meta as inline JSON or @path to a JSON file",
+    )
+    parser.add_argument("--message", help="output package commit message")
+    workflow = parser.add_mutually_exclusive_group()
+    workflow.add_argument(
+        "--workflow",
+        metavar="ID",
+        help="name one workflow from the output registry's config (default: registry default)",
+    )
+    workflow.add_argument(
+        "--no-workflow",
+        action="store_true",
+        help="explicitly opt out of a workflow; refused when the registry requires one",
+    )
+    add_aws_arguments(parser)
+
+
+def add_parser(subparsers: Any) -> None:
+    """Register the ``scene`` group and its verbs."""
+    scene = subparsers.add_parser(
+        "scene",
+        help="preflight and execute one bounded Scene",
+        description=(
+            "Bounded Scene execution with short-lived Scene authority. Persistent IAM "
+            "changes live in the separate 'pearls infra' group."
+        ),
+    )
+    verbs = scene.add_subparsers(dest="verb", metavar="VERB", required=True)
+
+    check = verbs.add_parser(
+        "check",
+        help="read-only preflight; mints nothing and writes nothing",
+        description=(
+            "Validate arguments, resolve and hash-verify the pinned genesis controls "
+            "and sealed handler, compile the session policy, and report the non-secret "
+            "authority. Performs no AssumeRole, no model invocation, and no write."
+        ),
+    )
+    _add_shared_arguments(check)
+    check.set_defaults(run=check_command)
+
+    run = verbs.add_parser(
+        "run",
+        help="execute exactly one Scene and publish its output package",
+        description=(
+            "Load the sealed handler from the pinned genesis revision and call "
+            "run_scene_from_genesis() exactly once. Mints one Scene credential and "
+            "publishes one output package."
+        ),
+    )
+    _add_shared_arguments(run)
+    run.set_defaults(run=run_command)
+
+
+def _resolve_workflow(args: argparse.Namespace) -> tuple[str | None | object, str | None]:
+    """Return the workflow selector for publication and its display value."""
+    if args.no_workflow:
+        return None, None
+    if args.workflow is not None:
+        return args.workflow, args.workflow
+    return ..., _DEFAULT_WORKFLOW
+
+
+def _validate_arguments(
+    runtime: Runtime, args: argparse.Namespace
+) -> tuple[str, str, dict[str, Any], str | None | object, str | None]:
+    """Validate every argument shape offline, before any AWS call."""
+    scene_id = args.scene_id or generate_scene_id(runtime.clock())
+    validate_assume_role_request(
+        role_arn=args.role_arn,
+        scene_id=scene_id,
+        duration_seconds=args.duration_seconds,
+        external_id=args.external_id,
+    )
+    model_arn = parse_bedrock_model(args.model_arn)
+    if model_arn is None:  # argparse marks --model-arn required.
+        raise CliRefusal("--model-arn is required")
+    metadata = read_json_argument(args.metadata, label="--metadata") if args.metadata else {}
+    if args.message is not None and not args.message.strip():
+        raise CliRefusal("--message must not be blank")
+    if not args.handler_key:
+        raise CliRefusal("--handler-key must not be empty")
+    workflow, workflow_display = _resolve_workflow(args)
+    return scene_id, model_arn, metadata, workflow, workflow_display
+
+
+def _genesis_document(genesis: PinnedManifestURI) -> dict[str, Any]:
+    return {
+        "uri": genesis.original,
+        "bucket": genesis.bucket,
+        "package_name": genesis.package_name,
+        "top_hash": genesis.top_hash,
+    }
+
+
+def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Run the read-only preflight for one sealed-genesis Scene."""
+    emitter = Emitter(runtime, args.json_output)
+    checks: list[dict[str, str]] = []
+
+    def record(name: str, identity: str, detail: str) -> None:
+        checks.append({"name": name, "identity": identity, "status": "pass", "detail": detail})
+
+    scene_id, model_arn, metadata, _workflow, workflow_display = _validate_arguments(runtime, args)
+    genesis = parse_manifest_uri(args.genesis)
+    record(
+        "genesis-uri-pinned",
+        _LOCAL,
+        f"complete top hash {genesis.top_hash} for package {genesis.package_name}",
+    )
+    record(
+        "argument-shapes",
+        _LOCAL,
+        f"role ARN, Scene ID {scene_id}, {args.duration_seconds}s duration"
+        + (", external ID" if args.external_id else ""),
+    )
+    record("model-arn-exact", _LOCAL, model_arn)
+    record(
+        "output-metadata-shapes",
+        _LOCAL,
+        f"{len(metadata)} declared metadata key(s), "
+        f"message {'provided' if args.message else 'absent'}, "
+        f"workflow {workflow_display if workflow_display is not None else '<explicitly none>'}",
+    )
+
+    # Only S3 reads from here on: the bootstrap identity resolves the pinned
+    # revision and reads its sealed control objects by exact version.
+    session = build_session(runtime, args)
+    s3_client = session.client("s3")
+    loader = _caching_loader(runtime.manifest_loader)
+
+    preflight = runtime.preflight_genesis(
+        args.genesis,
+        bedrock_model=model_arn,
+        manifest_loader=loader,
+        genesis_s3_client=s3_client,
+        max_policy_characters=DEFAULT_MAX_POLICY_CHARACTERS,
+    )
+    record(
+        "genesis-manifest-resolved",
+        _BOOTSTRAP,
+        f"{len(preflight.objects)} manifest entries at the requested top hash",
+    )
+    record(
+        "genesis-layout",
+        _BOOTSTRAP,
+        "README.md, outputs.json, and at least one input/ entry are present",
+    )
+    record(
+        "genesis-controls-verified",
+        _BOOTSTRAP,
+        "README.md and outputs.json read by exact S3 version and matched their Quilt hashes",
+    )
+    compilation = preflight.compilation
+    record(
+        "output-selectors",
+        _BOOTSTRAP,
+        f"{len(compilation.writable_selectors)} write selector(s) targeting "
+        f"{compilation.output_package.name}@{compilation.output_package.bucket}",
+    )
+
+    # verify, never load: a preflight must not execute genesis code, because a
+    # module body runs with this identity's authority, not the Scene's.
+    sealed = runtime.verify_sealed_handler(
+        args.genesis,
+        manifest_loader=loader,
+        genesis_s3_client=s3_client,
+        handler_key=args.handler_key,
+    )
+    record(
+        "sealed-handler-verified",
+        _BOOTSTRAP,
+        f"{args.handler_key} matched its Quilt hash (sha256 {sealed.source_sha256[:16]}...) "
+        f"and binds a module-level handler; the bytes were not executed",
+    )
+    record(
+        "session-policy-compiled",
+        _LOCAL,
+        f"{compilation.mode} authority in {compilation.size} of "
+        f"{DEFAULT_MAX_POLICY_CHARACTERS} characters",
+    )
+
+    payload = envelope(SCENE_CHECK_SCHEMA, "ok")
+    payload.update(
+        {
+            "scene_id": scene_id,
+            "genesis": _genesis_document(genesis),
+            "role_arn": args.role_arn,
+            "model_arn": model_arn,
+            "duration_seconds": args.duration_seconds,
+            "handler": sealed.report(),
+            "authority": compilation.report(),
+            "output": {
+                "package_name": compilation.output_package.name,
+                "bucket": compilation.output_package.bucket,
+                "metadata_keys": sorted(metadata),
+                "message_provided": bool(args.message),
+                "workflow": workflow_display,
+            },
+            "checks": checks,
+            "mutations_performed": [],
+            "unproven": list(UNPROVEN_CONDITIONS),
+        }
+    )
+
+    for entry in checks:
+        emitter.line(f"pass  {entry['name']} ({entry['identity']})")
+        emitter.line(f"      {entry['detail']}")
+    emitter.line("")
+    render_table(
+        emitter,
+        [
+            ("scene id", scene_id),
+            ("authority mode", compilation.mode),
+            ("policy size", f"{compilation.size} characters"),
+            (
+                "output package",
+                f"{compilation.output_package.name}@{compilation.output_package.bucket}",
+            ),
+        ],
+    )
+    emitter.line("")
+    emitter.line("Checks marked trusted-bootstrap used this identity's read access, not")
+    emitter.line("Scene credentials. No AssumeRole, model invocation, or write was performed,")
+    emitter.line("and no byte of the sealed handler was executed.")
+    emitter.line("Not proven by this preflight:")
+    for condition in UNPROVEN_CONDITIONS:
+        emitter.line(f"  - {condition}")
+    emitter.document(payload)
+    return EXIT_OK
+
+
+def _receipt(
+    *,
+    scene_id: str,
+    genesis: PinnedManifestURI,
+    sealed: SealedSource,
+    args: argparse.Namespace,
+    model_arn: str,
+    metadata: Mapping[str, Any],
+    workflow_display: str | None,
+    result: Any,
+) -> dict[str, Any]:
+    payload = envelope(SCENE_RUN_SCHEMA, "published")
+    payload.update(
+        {
+            "scene_id": scene_id,
+            "genesis": _genesis_document(genesis),
+            "handler": sealed.report(),
+            "role_arn": args.role_arn,
+            "model_arn": model_arn,
+            "assumed_role_arn": result.assumed_role_arn,
+            "output": {
+                "package_name": result.output_package.name,
+                "bucket": result.output_package.bucket,
+                "top_hash": result.top_hash,
+                "package_uri": result.package_uri,
+                # Keys only: metadata values are never echoed back implicitly.
+                "metadata_keys": sorted(metadata),
+                "message_provided": bool(args.message),
+                "workflow": workflow_display,
+            },
+            "timestamps": {
+                "started_at": iso8601(result.started_at),
+                "completed_at": iso8601(result.completed_at),
+            },
+        }
+    )
+    return payload
+
+
+def _deferred_handler(sealed: SealedSource, emitter: Emitter) -> SceneHandler:
+    """Return a handler that executes the sealed bytes at invocation time.
+
+    Deferring execution is what orders the run correctly. The runner checks the
+    genesis layout, compiles the session policy, mints the Scene credential, and
+    materializes the verified inputs before it calls a handler, so nothing from
+    the genesis package runs until every one of those checks has passed. An eager
+    load would execute the module body first and make those checks unreachable.
+    """
+
+    def invoke(
+        inputs: Mapping[str, Any], session: Any, context: SceneContext
+    ) -> SceneHandlerResult:
+        emitter.note(f"scene {context.scene_id}: executing {sealed.descriptor.logical_key}")
+        return sealed.load().handler(inputs, session, context)
+
+    return invoke
+
+
+def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Execute exactly one Scene from its pinned genesis revision."""
+    emitter = Emitter(runtime, args.json_output)
+    scene_id, model_arn, metadata, workflow, workflow_display = _validate_arguments(runtime, args)
+    genesis = parse_manifest_uri(args.genesis)
+
+    session = build_session(runtime, args)
+    s3_client = session.client("s3")
+    sts_client = session.client("sts")
+    loader = _caching_loader(runtime.manifest_loader)
+
+    sealed = runtime.verify_sealed_handler(
+        args.genesis,
+        manifest_loader=loader,
+        genesis_s3_client=s3_client,
+        handler_key=args.handler_key,
+    )
+    emitter.note(
+        f"scene {scene_id}: verified sealed {args.handler_key} "
+        f"(sha256 {sealed.source_sha256[:16]}...) from {genesis.top_hash}"
+    )
+
+    result = runtime.run_scene_from_genesis(
+        args.genesis,
+        role_arn=args.role_arn,
+        scene_id=scene_id,
+        handler=_deferred_handler(sealed, emitter),
+        bedrock_model=model_arn,
+        duration_seconds=args.duration_seconds,
+        external_id=args.external_id,
+        manifest_loader=loader,
+        genesis_s3_client=s3_client,
+        sts_client=sts_client,
+        session_factory=runtime.worker_session_factory,
+        clock=runtime.clock,
+        output_meta=metadata or None,
+        output_message=args.message,
+        output_workflow=workflow,
+    )
+
+    payload = _receipt(
+        scene_id=scene_id,
+        genesis=genesis,
+        sealed=sealed,
+        args=args,
+        model_arn=model_arn,
+        metadata=metadata,
+        workflow_display=workflow_display,
+        result=result,
+    )
+    emitter.line(result.package_uri)
+    render_table(
+        emitter,
+        [
+            ("scene id", scene_id),
+            ("assumed role", result.assumed_role_arn),
+            ("output top hash", result.top_hash),
+            ("started at", iso8601(result.started_at)),
+            ("completed at", iso8601(result.completed_at)),
+        ],
+    )
+    emitter.document(payload)
+    return EXIT_OK

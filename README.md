@@ -282,6 +282,98 @@ against a handler that makes direct S3 calls or retains the session. The
 low-level `run_scene(manifest_uri, scope_spec, ...)` API remains available
 unchanged.
 
+### Command line
+
+Installing the package creates one `pearls` command with two groups:
+
+```text
+pearls
+  scene   check | run                                        bounded Scene authority
+  infra   validate | plan | deploy | status | assume-policy   administrator IAM
+```
+
+The split is deliberate. `scene` operates with bounded, short-lived Scene
+authority; `infra` mutates persistent IAM with administrator authority. Shared
+conventions across both groups:
+
+| Concern | Convention |
+| --- | --- |
+| Credentials | `--profile` / `--region`, resolved by boto3; never accepted as arguments |
+| Output | Human-readable on stdout by default, `--json` for a stable versioned document |
+| Confirmation | Read-only verbs never prompt; mutating verbs require confirmation or `--yes` |
+| Exit codes | `0` success, `1` typed refusal or failure, `2` usage error |
+| Safety | No credentials, secret material, or handler inputs/outputs are printed |
+
+A sealed-genesis Scene carries its executable protocol at
+`protocol/handler.py`, alongside the `README.md` control prompt, `outputs.json`
+write grant, and `input/` entries. `pearls scene` reads that entry from the
+requested pinned revision by exact S3 version and verifies its bytes against the
+Quilt content hash in the manifest before anything else happens to them.
+
+Verifying and executing are deliberately separate steps, because a Python module
+body runs as soon as it is imported. `scene check` only verifies: it checks the
+hash and then checks *statically*, by parsing, that the bytes bind a module-level
+`handler`. It never imports them. `scene run` verifies the same way and then
+executes, but only when the runner calls the handler, which is after the genesis
+layout is checked, the session policy is compiled, the Scene credential is
+minted, and the verified inputs are materialized. Nothing in a genesis package
+runs until every one of those checks has passed.
+
+`scene check` is therefore a genuinely read-only preflight. It validates every
+argument shape, resolves and hash-verifies the genesis controls and the sealed
+handler, compiles the session policy, and prints the non-secret authority report.
+It performs no `AssumeRole`, no model invocation, no write, and no execution of
+genesis code, so a nonzero exit always precedes all of those:
+
+```console
+pearls scene check \
+  --genesis 'quilt+s3://quilt-dev#package=proj%2Ftrial001-worker&top_hash=<64 hex characters>' \
+  --role-arn arn:aws:iam::123456789012:role/scene-execution-haiku \
+  --model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
+```
+
+Each reported check names the identity it needed. Checks labeled
+`trusted-bootstrap` used the operator's own read access, because the genesis
+controls must be read before a Scene credential can exist. The command also
+prints what it cannot prove: Bedrock account model access, the base role's own
+permissions, the output registry's workflow contract, the safety (as distinct
+from the identity) of the sealed handler, and — because it does not import the
+handler — whether the handler imports cleanly or is actually callable.
+
+`scene run` executes one Scene. It calls `run_scene_from_genesis()` exactly once
+and adds no authority, materialization, workflow, or publication logic of its
+own:
+
+```console
+pearls scene run \
+  --genesis 'quilt+s3://quilt-dev#package=proj%2Ftrial001-worker&top_hash=<64 hex characters>' \
+  --role-arn arn:aws:iam::123456789012:role/scene-execution-haiku \
+  --model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0 \
+  --metadata @output-meta.json \
+  --message "Trial 001 worker Scene run" \
+  --json
+```
+
+`--scene-id` is accepted; when omitted a collision-resistant valid
+`RoleSessionName` is generated. `--metadata` takes inline JSON or `@path`, and
+maps to the workflow-aware `output_meta`; `--message` and `--workflow` /
+`--no-workflow` map to `output_message` and `output_workflow`. The JSON receipt
+is versioned and contains only non-secret run identity: Scene ID, genesis
+URI/top hash, verified handler provenance, assumed-role ARN, the immutable
+output package URI and top hash, and timestamps. Metadata is reported by key
+only, and diagnostics go to stderr so `--json` stdout stays parseable.
+
+Two boundaries survive the CLI unchanged. The **trusted bootstrap identity**
+reads the pinned manifest and the sealed control objects by exact version before
+minting anything; `--profile` and `--region` apply to those reads and to
+`AssumeRole`, never to the Scene session, which is built only from the minted
+credential and the model ARN's region. The **trusted-handler** boundary is
+unchanged too: verifying the handler's hash proves code identity, not code
+safety. During a run the handler executes in-process and receives the scoped
+session that publication later uses. Ordering execution after the authority
+checks limits *when* sealed code runs, not what it can do once it runs. The
+command claims no sandboxing and no ambient credential isolation.
+
 ### Mapping to the four Scene roles
 
 | Scene role | AWS-native enforcement |
@@ -393,6 +485,94 @@ does not require one. The worker must not be able to retrieve broader ambient
 task, instance, or execution-role credentials; otherwise it can bypass the
 scoped credentials entirely.
 
+### Deploying execution roles with `pearls infra`
+
+The same template ships inside the wheel, so an installed Pearls can deploy it
+without hand-assembling the parameters, remembering the named-IAM capability, or
+keeping the stack name and `RoleName` aligned. A byte-identity test keeps the
+packaged copy and
+[`infra/scene-execution-role.yaml`](infra/scene-execution-role.yaml) the same
+file, so the installed CLI cannot deploy a role that differs from the one
+reviewed here.
+
+`pearls infra validate` is fully offline. It parses the template, checks any
+supplied values against the template's own `AllowedPattern`s and numeric bounds,
+and checks the consistency the template cannot express, in particular that the
+model ARN's region matches the deployment region:
+
+```console
+pearls infra validate \
+  --orchestrator-principal-arn arn:aws:iam::123456789012:user/orchestrator \
+  --project-bucket-arn-pattern 'arn:aws:s3:::quilt-dev-*' \
+  --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0 \
+  --role-name scene-execution-haiku \
+  --region us-east-1 \
+  --lint
+```
+
+`pearls infra plan` creates a change set, prints the parameter diff, the resource
+changes, and the rendered trust policy and inline role policy, then deletes the
+change set. It never executes it and changes no stack resource. Planning a stack
+name that does not exist yet is the one visible side effect: CloudFormation
+creates the stack in `REVIEW_IN_PROGRESS` with no resources, and the command says
+so, because no `pearls` verb has delete authority. A later `deploy` of the same
+stack name proceeds normally. `pearls infra deploy` renders the same review
+material, requires confirmation unless `--yes`,
+passes `CAPABILITY_NAMED_IAM` explicitly, waits for a terminal stack status, and
+prints `SceneExecutionRoleArn` in a form usable directly as
+`pearls scene run --role-arn`. Re-running `deploy` with unchanged parameters is a
+reported no-op rather than an error, and a failed or rolled-back deployment exits
+nonzero with the CloudFormation failure reason preserved.
+
+Because one role admits exactly one model, the Trial 001 two-model project needs
+one role per model. `--stack-name` defaults to `--role-name`, so the two cannot
+silently diverge:
+
+```console
+pearls infra deploy \
+  --orchestrator-principal-arn arn:aws:iam::123456789012:user/orchestrator \
+  --project-bucket-arn-pattern 'arn:aws:s3:::quilt-dev-*' \
+  --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0 \
+  --role-name scene-execution-haiku \
+  --region us-east-1 --yes
+
+pearls infra deploy \
+  --orchestrator-principal-arn arn:aws:iam::123456789012:user/orchestrator \
+  --project-bucket-arn-pattern 'arn:aws:s3:::quilt-dev-*' \
+  --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0 \
+  --role-name scene-execution-nova \
+  --region us-east-1 --yes
+```
+
+The orchestrator then needs `sts:AssumeRole` on both roles.
+`pearls infra assume-policy` generates that document from the deployed stacks and
+prints it by default; applying it requires an explicit flag and confirmation, and
+warns that it replaces any existing inline policy of that name:
+
+```console
+pearls infra assume-policy \
+  --from-stack scene-execution-haiku \
+  --from-stack scene-execution-nova
+
+pearls infra assume-policy \
+  --from-stack scene-execution-haiku \
+  --from-stack scene-execution-nova \
+  --apply-to-user orchestrator --yes
+```
+
+`pearls infra status --stack-name scene-execution-haiku` reports the stack
+status, its parameters, and the drift-relevant identity (role ARN, admitted model
+ARN, bucket pattern, maximum session duration) so an operator can confirm a role
+still matches the Scene they intend to run.
+
+Three limits are reported by the commands themselves rather than papered over.
+Bedrock account-level model access cannot be provisioned by this template and
+remains a console prerequisite; the role alone is not sufficient. The trust
+policy admits the orchestrator principal with no `sts:ExternalId` condition,
+while `mint(external_id=...)` exists for separately managed roles. The template
+targets the commercial `aws` partition only. These commands also never delete a
+stack or a role: there is no cleanup authority here.
+
 ### Live AWS authorization proof
 
 [`tests/aws/test_authorization.py`](tests/aws/test_authorization.py) is an
@@ -446,6 +626,19 @@ run.
 
 ### Security and maturity boundaries
 
+- `pearls scene run` verifies the sealed handler's bytes against the pinned
+  manifest before executing them, which establishes code identity, not code
+  safety. The handler runs in-process with this process's authority and receives
+  the scoped Scene session that publication later uses. Installing the CLI does
+  not add a sandbox; a genesis package you would not run by hand is equally
+  dangerous through the command. `pearls scene check` does not import the handler
+  at all, so a preflight of an untrusted package executes none of it, but that
+  makes `check` a safe inspection step rather than a safety guarantee about the
+  subsequent run.
+- `pearls infra` verbs mutate persistent IAM with administrator authority and are
+  kept in a separate group for that reason. `validate` and `plan` change nothing,
+  `deploy` and `assume-policy --apply-to-*` require confirmation or `--yes`, and
+  no verb can delete a stack, a role, or an object.
 - The publisher requires output bucket versioning before its first write and
   requires every S3 write to return a non-null version ID. Concurrent writers
   can create unreferenced object versions, but the winning `latest` manifest

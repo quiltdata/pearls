@@ -4,6 +4,113 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.4] - 2026-08-20
+
+### Added
+
+- Added an installed `pearls` console entry point with two command groups.
+  `pearls scene check | run` covers the reusable operator side of one
+  sealed-genesis Scene run; `pearls infra validate | plan | deploy | status |
+  assume-policy` wraps the administrator-applied execution-role template. Both
+  groups share one skeleton: `--profile` / `--region` resolved by boto3,
+  human-readable stdout with `--json` for a stable versioned document,
+  diagnostics on stderr, read-only verbs that never prompt, mutating verbs that
+  require confirmation or `--yes`, and `0` / `1` / `2` exit codes for success,
+  typed refusal, and usage error.
+- Added the `protocol/handler.py` sealed-handler convention, split into a
+  verification step and an execution step because importing a Python module runs
+  its body. `verify_sealed_handler()` reads that entry from the requested pinned
+  revision by exact S3 version, verifies its bytes against the manifest's Quilt
+  content hash, and checks statically, by parsing, that they bind a module-level
+  `handler`, executing nothing. `SealedSource.load()` is the single point at which
+  sealed bytes run and re-checks that the binding is callable;
+  `load_sealed_handler()` remains the eager convenience API. `report()` records
+  the version ID, Quilt hash, and source SHA-256 that were verified.
+- Added `preflight_genesis()`, which resolves, verifies, and compiles one pinned
+  genesis package without minting. `run_scene_from_genesis()` now uses it too, so
+  `pearls scene check` and `pearls scene run` agree by construction on layout,
+  authority, and compiled policy rather than by duplicated logic.
+- Added `read_manifest_object()`, `validate_assume_role_request()`,
+  `parse_bedrock_model()`, and `bedrock_model_region()` as public primitives, so
+  the CLI can verify an object, an AssumeRole request, and a model ARN offline
+  without restating the library's rules.
+- Added the execution-role template to the wheel as
+  `raja_sts/templates/scene-execution-role.yaml`, kept byte-identical to
+  `infra/scene-execution-role.yaml` by test. `pearls infra` reads parameter
+  constraints from the template itself, so client-side validation cannot drift
+  from what CloudFormation enforces.
+
+### Security
+
+- `pearls scene check` performs only reads. It calls no `AssumeRole`, invokes no
+  model, writes no object, and executes no byte of the sealed handler, and it
+  labels every check with the identity that performed it, so the reads that
+  require the trusted bootstrap identity are visible rather than implied.
+- `pearls scene run` defers handler execution to the moment the runner invokes it,
+  so the genesis layout check, the compiled session policy, the minted Scene
+  credential, and the verified input materialization all precede any sealed code
+  running. An eager import would have run the module body first and made those
+  checks unreachable.
+- `pearls scene check` reports what it cannot prove: Bedrock account-level model
+  access, the base role's own permissions, the output registry's workflow
+  contract, the safety as distinct from the identity of the sealed handler, and,
+  because it does not import the handler, whether the handler imports cleanly or
+  is callable at all.
+- Credential resolution failures, missing regions, and AWS API refusals are
+  reported as typed refusals with a nonzero exit rather than as tracebacks.
+- `--profile` and `--region` apply only to the operator's own calls, never to the
+  Scene session, which is built from the minted credential and the model ARN's
+  region alone. The two boundaries are documented as boundaries: verifying the
+  handler's bytes proves code identity, not code safety.
+- JSON receipts contain only non-secret run identity and status. Output package
+  metadata is reported by key, never by value, and no command prints credentials
+  or handler inputs and outputs.
+- `pearls infra validate` and `plan` create, update, and delete no stack
+  resource. `deploy` passes `CAPABILITY_NAMED_IAM` explicitly, reports that named
+  IAM resources are involved, and requires confirmation unless `--yes`. A model
+  ARN whose region differs from the deployment region is refused before any stack
+  mutation, because that mismatch would otherwise surface only as a fail-closed
+  Scene run. `assume-policy` prints by default and mutates IAM only behind an
+  explicit flag plus confirmation, warning that it replaces the inline policy of
+  that name. No verb deletes a stack, a role, or an object.
+
+### Known limitations
+
+- Verified sealed handlers execute in-process with the calling process's ambient
+  authority. Hash verification is a provenance boundary, not a sandbox, and the
+  CLI adds no isolation over the existing `run_scene_from_genesis()` contract.
+  Ordering execution after the authority checks constrains when sealed code runs,
+  not what it can do once it runs.
+- The static check that sealed bytes bind a module-level `handler` cannot prove
+  the binding is callable or that the module imports cleanly. Those are only known
+  once the bytes execute, which during a run is after the Scene credential has
+  been minted.
+- The sealed handler is read by the trusted bootstrap identity, not by the Scene
+  credential, because `run_scene_from_genesis()` compiles reads from `input/`
+  only. Executing sealed code therefore still depends on the operator's own read
+  access to the genesis registry.
+- quilt3 resolves the pinned manifest with its own ambient credentials, so
+  `--profile` does not apply to manifest resolution, only to the object reads and
+  AWS calls Pearls makes directly.
+- `pearls infra plan` creates and then deletes a CloudFormation change set; the
+  change set itself is an API object, even though no stack resource is created,
+  updated, or deleted. `--keep-change-set` retains it for out-of-band review.
+  Planning a stack name that does not exist yet leaves that stack in
+  `REVIEW_IN_PROGRESS` with no resources; the command reports this, and removing an
+  abandoned shell is an explicit administrator action because no verb here can
+  delete.
+- `deploy` confirms an executed change by waiting for CloudFormation to leave the
+  stack's pre-execution state, using `LastUpdatedTime` and observed in-progress
+  statuses. If neither changes within `--wait-seconds` it reports that the outcome
+  could not be confirmed rather than reporting stale outputs as success.
+- The rendered trust and inline policies substitute only the `Ref` and `Fn::Sub`
+  forms this template uses. Other intrinsics are shown as marked placeholders
+  rather than guessed, and rendering is for review, not a substitute for reading
+  the CloudFormation change set.
+- Multi-Scene trial orchestration, retries, and reuse of an existing output
+  package name remain out of scope pending re-execution semantics; inference
+  profiles and handler-derived package metadata remain separate concerns.
+
 ## [0.1.3] - 2026-08-20
 
 ### Added
