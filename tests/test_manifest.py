@@ -252,6 +252,10 @@ def test_parse_output_selectors_supports_package_subtree_and_object_shapes() -> 
             "quilt+s3://output-bucket/results/a.txt#package=project%2Foutput": "child",
         },
         {
+            "quilt+s3://output-bucket/results/a/#package=project%2Foutput": "child first",
+            "quilt+s3://output-bucket/results/#package=project%2Foutput": "parent second",
+        },
+        {
             "quilt+s3://output-bucket/a#package=project%2Foutput": "one",
             "quilt+s3://other-bucket/b#package=project%2Foutput": "two",
         },

@@ -167,9 +167,9 @@ def _selectors_overlap(left: OutputSelector, right: OutputSelector) -> bool:
         return True
     if left.kind == "object" and right.kind == "object":
         return left.path == right.path
-    if left.kind == "subtree":
-        return right.path.startswith(left.path)
-    return left.path.startswith(right.path)
+    return (left.kind == "subtree" and right.path.startswith(left.path)) or (
+        right.kind == "subtree" and left.path.startswith(right.path)
+    )
 
 
 def parse_output_selectors(value: object) -> tuple[OutputSelector, ...]:

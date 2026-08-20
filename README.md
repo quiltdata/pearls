@@ -271,13 +271,16 @@ result = run_scene_from_genesis(
 )
 ```
 
-The trusted bootstrap identity resolves the pinned manifest and reads the two
-control objects by exact version before minting the worker credential. Their
-Quilt hashes are verified. Handlers run in-process as trusted execution code:
-they receive the scoped session that publication later uses, so selector and
-reserved-key checks constrain returned objects but are not a sandbox against a
-handler that makes direct S3 calls or retains the session. The low-level
-`run_scene(manifest_uri, scope_spec, ...)` API remains available unchanged.
+The `bedrock_model` is deliberately supplied by the execution plane and
+recorded in the authority report; it is not derived from the sealed genesis
+package. The trusted bootstrap identity resolves the pinned manifest and reads
+the two control objects by exact version before minting the worker credential.
+Their Quilt hashes are verified. Handlers run in-process as trusted execution
+code: they receive the scoped session that publication later uses, so selector
+and reserved-key checks constrain returned objects but are not a sandbox
+against a handler that makes direct S3 calls or retains the session. The
+low-level `run_scene(manifest_uri, scope_spec, ...)` API remains available
+unchanged.
 
 ### Mapping to the four Scene roles
 
