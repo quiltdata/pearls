@@ -2,46 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
+import io
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote, urlencode, urlunparse
+
+from quilt3 import Package, checksums
+from quilt3.packages import PackageEntry
+from quilt3.util import PhysicalKey
 
 from .errors import PublicationError
 from .models import OutputPackage
-
-
-def _physical_uri(bucket: str, key: str, version_id: str | None) -> str:
-    query = urlencode({"versionId": version_id}) if version_id is not None else ""
-    return urlunparse(("s3", bucket, quote(f"/{key}"), "", query, ""))
-
-
-def _top_hash(records: list[dict[str, Any]]) -> str:
-    digest = hashlib.sha256()
-    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":")).encode
-    digest.update(encoder({}).encode())
-    for record in records:
-        digest.update(
-            encoder(
-                {
-                    "hash": record["hash"],
-                    "logical_key": record["logical_key"],
-                    "meta": record["meta"],
-                    "size": record["size"],
-                }
-            ).encode()
-        )
-    return digest.hexdigest()
-
-
-def _manifest_bytes(records: list[dict[str, Any]]) -> bytes:
-    lines = [{}, *records]
-    return b"".join(
-        (json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-        for line in lines
-    )
 
 
 def publish_package(
@@ -53,11 +24,12 @@ def publish_package(
 ) -> str:
     """Publish a Quilt v1 package without listing or ambient AWS credentials.
 
-    Data objects are written first, followed by the immutable manifest and a
-    timestamped revision pointer. The named ``latest`` pointer is always last.
+    Data objects are written first, followed by Quilt's canonical immutable
+    manifest and a timestamped revision pointer. The create-only named
+    ``latest`` pointer is always last.
     """
     try:
-        records: list[dict[str, Any]] = []
+        package = Package()
         for logical_key in sorted(objects):
             body = objects[logical_key]
             physical_key = f"{output.name}/{logical_key}"
@@ -69,18 +41,28 @@ def publish_package(
             version_id = response.get("VersionId")
             if version_id is not None and not isinstance(version_id, str):
                 raise TypeError("S3 returned a non-string VersionId")
-            records.append(
-                {
-                    "logical_key": logical_key,
-                    "physical_keys": [_physical_uri(output.bucket, physical_key, version_id)],
-                    "size": len(body),
-                    "hash": {"type": "SHA256", "value": hashlib.sha256(body).hexdigest()},
-                    "meta": {},
-                }
+            package.set(
+                logical_key,
+                PackageEntry(
+                    PhysicalKey(output.bucket, physical_key, version_id),
+                    len(body),
+                    {
+                        "type": checksums.SHA256_HASH_NAME,
+                        "value": checksums.legacy_calculate_checksum_bytes(body),
+                    },
+                    {},
+                ),
             )
 
-        top_hash = _top_hash(records)
-        manifest = _manifest_bytes(records)
+        top_hash = package.top_hash
+        if not isinstance(top_hash, str):
+            raise TypeError("Quilt returned a non-string top hash")
+        manifest_buffer = io.BytesIO()
+        # Quilt's public dump() emits telemetry. _dump is the same canonical,
+        # in-memory serializer without process-global or network side effects.
+        package._dump(manifest_buffer)
+        manifest = manifest_buffer.getvalue()
+
         pointer_body = top_hash.encode("ascii")
         pointer_prefix = f".quilt/named_packages/{output.name}"
         s3_client.put_object(

@@ -18,9 +18,10 @@ All notable changes to this project are documented in this file.
 - Added standard `run/scene.json` and `run/invocation.json` records containing
   non-secret authority, lineage, audit identity, invocation, and timestamp
   metadata.
-- Added an explicit-session Quilt v1 publication adapter that writes output
-  data, an immutable manifest, and named pointers without bucket listing or
-  deletion, with a create-only conditional `latest` write performed last.
+- Added an explicit-session, Quilt-backed v1 publication adapter that uses
+  Quilt's canonical Package manifest and top-hash implementation, writes output
+  data and named pointers without bucket listing or deletion, and performs a
+  create-only conditional `latest` write last.
 
 ### Security
 

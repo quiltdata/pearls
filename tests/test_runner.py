@@ -269,7 +269,7 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert result.assumed_role_arn.endswith("/scene-3")
     assert result.package_uri.endswith(f"&top_hash={result.top_hash}")
     manifest = by_key[keys[-3]].decode().splitlines()
-    assert json.loads(manifest[0]) == {}
+    assert json.loads(manifest[0]) == {"version": "v0"}
     assert {json.loads(line)["logical_key"] for line in manifest[1:]} == {
         "result/prompt.txt",
         "result/response.txt",
