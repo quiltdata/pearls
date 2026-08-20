@@ -26,6 +26,6 @@ jobs:
       - run: ruff format --check .
       - run: ruff check .
       - run: mypy
-      - run: cfn-lint infra/*.yaml
+      - run: cfn-lint infra/*.yaml src/raja_sts/templates/*.yaml
       - run: pytest
       - run: python -m build

@@ -100,7 +100,13 @@ def _calculate_hash(hash_type: str, content: bytes) -> str:
     return result
 
 
-def _read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
+def read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
+    """Read one manifest entry by exact S3 version and verify its Quilt content hash.
+
+    The caller supplies the identity. Under a Scene session this reads a selected
+    input; under the trusted bootstrap identity it reads a sealed genesis control
+    object before any Scene credential exists.
+    """
     if item.version_id is None or item.hash_type is None or item.hash_value is None:
         raise AuthorityModeError(
             f"Selected input {item.logical_key!r} lacks a version ID or content hash"
@@ -137,7 +143,7 @@ def _read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
 
 def _read_inputs(s3_client: Any, compilation: CompiledPolicy) -> dict[str, MaterializedInput]:
     return {
-        item.logical_key: MaterializedInput(item, _read_manifest_object(s3_client, item))
+        item.logical_key: MaterializedInput(item, read_manifest_object(s3_client, item))
         for item in compilation.selected_objects
     }
 
@@ -412,6 +418,66 @@ def _parse_outputs_json(content: bytes) -> dict[str, object]:
     return value
 
 
+@dataclass(frozen=True, slots=True)
+class GenesisPreflight:
+    """Everything derived from a pinned genesis package before any STS call."""
+
+    genesis: PinnedManifestURI
+    objects: tuple[ManifestObject, ...]
+    by_logical_key: Mapping[str, ManifestObject]
+    control_prompt: str
+    writable: Mapping[str, object]
+    compilation: CompiledPolicy
+
+
+def preflight_genesis(
+    genesis_uri: str,
+    *,
+    bedrock_model: str,
+    manifest_loader: ManifestLoader | None = None,
+    genesis_s3_client: Any | None = None,
+    max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
+) -> GenesisPreflight:
+    """Resolve, verify, and compile one pinned genesis package without minting.
+
+    Performs only the reads the trusted bootstrap identity must perform: the
+    pinned manifest, then ``README.md`` and ``outputs.json`` by exact S3 version
+    with their Quilt content hashes verified. Calls no STS, invokes no model, and
+    writes nothing, so it is safe as a preflight. :func:`run_scene_from_genesis`
+    uses this same function, so a passing preflight and a run agree by
+    construction on layout, authority, and compiled policy.
+    """
+    genesis = parse_manifest_uri(genesis_uri)
+    loader = manifest_loader or load_quilt_manifest
+    objects, by_key = _genesis_objects(genesis, loader)
+    control_client = genesis_s3_client or boto3.client("s3")
+    prompt_bytes = read_manifest_object(control_client, by_key["README.md"])
+    try:
+        control_prompt = prompt_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ManifestLoadError("Genesis README.md must be UTF-8 text") from error
+    writable = _parse_outputs_json(read_manifest_object(control_client, by_key["outputs.json"]))
+    compilation = compile(
+        genesis_uri,
+        {
+            "readable": ["input/"],
+            "writable": writable,
+            "bedrock_model": bedrock_model,
+            "require_version_ids": True,
+        },
+        manifest_loader=lambda _: objects,
+        max_policy_characters=max_policy_characters,
+    )
+    return GenesisPreflight(
+        genesis=genesis,
+        objects=objects,
+        by_logical_key=by_key,
+        control_prompt=control_prompt,
+        writable=writable,
+        compilation=compilation,
+    )
+
+
 def run_scene_from_genesis(
     genesis_uri: str,
     *,
@@ -438,29 +504,15 @@ def run_scene_from_genesis(
     registry's workflow contract before anything is written.
     """
     started_at = clock()
-    genesis = parse_manifest_uri(genesis_uri)
-    loader = manifest_loader or load_quilt_manifest
-    objects, by_key = _genesis_objects(genesis, loader)
-    control_client = genesis_s3_client or boto3.client("s3")
-    prompt_bytes = _read_manifest_object(control_client, by_key["README.md"])
-    try:
-        control_prompt = prompt_bytes.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ManifestLoadError("Genesis README.md must be UTF-8 text") from error
-    writable = _parse_outputs_json(_read_manifest_object(control_client, by_key["outputs.json"]))
-    compilation = compile(
+    preflight = preflight_genesis(
         genesis_uri,
-        {
-            "readable": ["input/"],
-            "writable": writable,
-            "bedrock_model": bedrock_model,
-            "require_version_ids": True,
-        },
-        manifest_loader=lambda _: objects,
+        bedrock_model=bedrock_model,
+        manifest_loader=manifest_loader,
+        genesis_s3_client=genesis_s3_client,
         max_policy_characters=max_policy_characters,
     )
     return _execute_compiled_scene(
-        compilation=compilation,
+        compilation=preflight.compilation,
         role_arn=role_arn,
         scene_id=scene_id,
         handler=handler,
@@ -470,7 +522,7 @@ def run_scene_from_genesis(
         sts_client=sts_client,
         session_factory=session_factory,
         clock=clock,
-        control_prompt=control_prompt,
+        control_prompt=preflight.control_prompt,
         output_meta=output_meta,
         output_message=output_message,
         output_workflow=output_workflow,
