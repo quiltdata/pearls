@@ -157,6 +157,12 @@ def _load_schema(
             f"Workflow schema {schema_id!r} not found at s3://{bucket}/{key}"
         )
     content, returned_version = read
+    if (version_id or returned_version) is None:
+        raise WorkflowContractError(
+            f"Workflow schema {schema_id!r} at s3://{bucket}/{key} has no S3 version ID, "
+            "so the manifest stamp cannot pin the exact schema that was validated. "
+            "Enable bucket versioning and rewrite the workflow config and schema objects."
+        )
     try:
         schema = yaml.safe_load(content)
     except yaml.YAMLError as error:
@@ -199,6 +205,12 @@ def resolve_workflow_stamp(
             )
         return None
     config_bytes, config_version = read
+    if config_version is None:
+        raise WorkflowContractError(
+            f"Workflow config s3://{bucket}/{CONFIG_KEY} has no S3 version ID, so the "
+            "manifest stamp cannot pin the exact contract that was validated. Enable "
+            "bucket versioning and rewrite the workflow config and schema objects."
+        )
 
     try:
         config = yaml.safe_load(config_bytes)

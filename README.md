@@ -330,6 +330,11 @@ credentials can see):
   prefix (already part of the compiled read scope). `$ref` is rejected and
   only draft-07 meta-schemas are supported, for parity with quilt3's
   validator.
+- Contract objects must themselves be **versioned**: a config or schema
+  without an S3 version ID (written before versioning was enabled, or while
+  suspended) is refused, because the stamp could then only reference mutable
+  latest content instead of the exact contract that was validated. This is
+  stricter than quilt3, in the refuse direction only.
 
 `run_scene` and `run_scene_from_genesis` expose these as `output_meta`,
 `output_message`, and `output_workflow`.

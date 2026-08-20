@@ -17,6 +17,9 @@ All notable changes to this project are documented in this file.
   schema URIs with version IDs) into the manifest header exactly as quilt3
   does; a nonconforming one raises `WorkflowContractError` and leaves no
   partial writes.
+- Contract objects must themselves be versioned: a workflow config or schema
+  with no S3 version ID is refused, so the manifest stamp always pins the
+  exact contract that was validated (stricter than quilt3, refuse-only).
 - `publish_package`, `run_scene`, and `run_scene_from_genesis` accept
   package-level `user_meta` / `output_meta`, a commit `message` /
   `output_message`, and a `workflow` / `output_workflow` selector, so Scene

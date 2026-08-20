@@ -297,11 +297,18 @@ def test_non_bytes_workflow_object_is_refused() -> None:
         _resolve(TextS3())  # type: ignore[arg-type]
 
 
-def test_null_config_version_omits_version_from_stamp() -> None:
+def test_unversioned_config_is_refused() -> None:
     config = CONFIG.replace("is_workflow_required: true", "is_workflow_required: false")
     client = WorkflowS3({CONFIG_KEY: (config.encode(), "null")})
-    stamp = _resolve(client, workflow=None)
-    assert stamp == {"id": None, "config": f"s3://{BUCKET}/{CONFIG_KEY}"}
+    with pytest.raises(WorkflowContractError, match="config .* has no S3 version ID"):
+        _resolve(client, workflow=None)
+
+
+def test_unversioned_schema_is_refused() -> None:
+    client = _client()
+    client.objects[".quilt/workflows/trial-run-v1.json"] = (METADATA_SCHEMA, "null")
+    with pytest.raises(WorkflowContractError, match="schema .* has no S3 version ID"):
+        _resolve(client)
 
 
 def test_ref_nested_in_a_list_is_refused() -> None:
