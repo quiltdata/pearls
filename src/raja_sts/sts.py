@@ -16,6 +16,7 @@ from .policy import DEFAULT_MAX_POLICY_CHARACTERS, compile
 
 _ROLE_ARN_RE = re.compile(r"^arn:aws:iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+$")
 _SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_+=,.@-]{2,64}$")
+_EXTERNAL_ID_RE = re.compile(r"^[A-Za-z0-9_+=,.@:/-]{2,1224}$")
 
 
 def validate_assume_role_request(
@@ -39,9 +40,11 @@ def validate_assume_role_request(
     if not isinstance(duration_seconds, int) or not 900 <= duration_seconds <= 43200:
         raise InvalidAssumeRoleRequest("duration_seconds must be between 900 and 43200")
     if external_id is not None and (
-        not isinstance(external_id, str) or not 2 <= len(external_id) <= 1224
+        not isinstance(external_id, str) or not _EXTERNAL_ID_RE.fullmatch(external_id)
     ):
-        raise InvalidAssumeRoleRequest("external_id must contain 2-1224 characters")
+        raise InvalidAssumeRoleRequest(
+            "external_id must contain 2-1224 characters from A-Z a-z 0-9 _ + = , . @ : / -"
+        )
 
 
 def mint_compiled(

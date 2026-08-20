@@ -54,7 +54,13 @@ def _declares_handler(source: bytes, handler_key: str) -> None:
                 if isinstance(target, ast.Name) and target.id == HANDLER_ATTRIBUTE:
                     return
         elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and node.target.id == HANDLER_ATTRIBUTE:
+            # A bare `handler: object` annotates without assigning, so importing
+            # the module would leave the attribute absent.
+            if (
+                node.value is not None
+                and isinstance(node.target, ast.Name)
+                and node.target.id == HANDLER_ATTRIBUTE
+            ):
                 return
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:

@@ -235,3 +235,9 @@ def test_default_client_comes_from_boto3_when_none_is_supplied(
 
     assert requested == ["s3"]
     assert sealed.descriptor.logical_key == "protocol/handler.py"
+
+
+def test_an_annotation_without_a_value_binds_nothing_and_is_refused() -> None:
+    """`handler: object` annotates without assigning, so the attribute is absent."""
+    with pytest.raises(HandlerContractError, match="does not bind a module-level"):
+        _verify(GenesisFixture(handler_source=b"handler: object\n"))

@@ -298,7 +298,7 @@ conventions across both groups:
 
 | Concern | Convention |
 | --- | --- |
-| Credentials | `--profile` / `--region`, resolved by boto3; never accepted as arguments |
+| Credentials | Selected with `--profile` / `--region` and resolved by boto3; no command accepts key material, tokens, or ARN-bearing secrets as arguments |
 | Output | Human-readable on stdout by default, `--json` for a stable versioned document |
 | Confirmation | Read-only verbs never prompt; mutating verbs require confirmation or `--yes` |
 | Exit codes | `0` success, `1` typed refusal or failure, `2` usage error |

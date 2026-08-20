@@ -666,6 +666,112 @@ def test_explicit_stack_name_overrides_the_role_name_default() -> None:
     assert harness.streams.json()["stack_name"] == "pearls-worker"
 
 
+@pytest.mark.parametrize("verb", ["plan", "deploy"], ids=["plan", "plan-only"])
+def test_a_role_name_that_is_not_a_valid_stack_name_is_refused_locally(verb: str) -> None:
+    """The template admits role names CloudFormation rejects as stack names."""
+    harness = InfraHarness()
+    supplied = list(PARAMETERS)
+    supplied[supplied.index("--role-name") + 1] = "scene_execution.haiku"
+    extra = ["--plan-only"] if verb == "deploy" else []
+
+    code = harness.invoke("infra", verb, *supplied, *extra)
+
+    assert code == 1
+    stderr = harness.streams.stderr
+    assert "defaulted from --role-name" in stderr
+    assert "Pass an explicit --stack-name" in stderr
+    # Refused before any AWS call, not at the change set.
+    assert harness.cloudformation.calls == []
+
+
+def test_an_invalid_explicit_stack_name_is_refused_without_blaming_the_role_name() -> None:
+    harness = InfraHarness()
+
+    code = harness.invoke("infra", "plan", *PARAMETERS, "--stack-name", "9-starts-with-digit")
+
+    assert code == 1
+    assert "is not a valid CloudFormation stack name" in harness.streams.stderr
+    assert "defaulted from" not in harness.streams.stderr
+    assert harness.cloudformation.calls == []
+
+
+def test_a_role_name_needing_a_separate_stack_name_works_when_given_one() -> None:
+    stacks = deployed_stack(name="pearls-trial001-haiku")
+    harness = InfraHarness(cloudformation=FakeCloudFormation(stacks=stacks))
+    supplied = list(PARAMETERS)
+    supplied[supplied.index("--role-name") + 1] = "scene_execution.haiku"
+
+    code = harness.invoke(
+        "infra", "plan", *supplied, "--stack-name", "pearls-trial001-haiku", "--json"
+    )
+
+    assert code == 0
+    payload = harness.streams.json()
+    assert payload["stack_name"] == "pearls-trial001-haiku"
+    assert payload["parameters"]["RoleName"] == "scene_execution.haiku"
+
+
+def test_json_deploy_shows_the_review_material_on_stderr_before_confirming() -> None:
+    """An operator must never be asked to approve IAM changes they cannot see."""
+    harness = InfraHarness()
+
+    code = harness.invoke("infra", "deploy", *PARAMETERS, "--json", answers=("no",))
+
+    assert code == 1
+    stderr = harness.streams.stderr
+    assert "Rendered trust policy:" in stderr
+    assert ORCHESTRATOR_ARN in stderr
+    assert "Rendered inline role policy:" in stderr
+    assert "type 'yes' to continue" in stderr
+    # The prompt came after the review material, not before it.
+    assert stderr.index("Rendered trust policy:") < stderr.index("type 'yes' to continue")
+    assert harness.cloudformation.executed == []
+
+
+def test_json_stdout_stays_a_single_parseable_document_when_review_goes_to_stderr() -> None:
+    harness = InfraHarness(
+        cloudformation=FakeCloudFormation(stacks=deployed_stack(), statuses=["CREATE_COMPLETE"])
+    )
+
+    assert harness.invoke("infra", "deploy", *PARAMETERS, "--json", "--yes") == 0
+
+    assert "Rendered trust policy:" in harness.streams.stderr
+    assert harness.streams.json()["status"] == "deployed"
+
+
+def test_plan_only_reports_a_no_op_the_same_way_plan_does() -> None:
+    def harness_for(verb: str, *extra: str) -> InfraHarness:
+        harness = InfraHarness(
+            cloudformation=FakeCloudFormation(
+                stacks=deployed_stack(),
+                change_set_status="FAILED",
+                change_set_reason="The submitted information didn't contain changes.",
+            )
+        )
+        assert harness.invoke("infra", verb, *PARAMETERS, *extra, "--json") == 0
+        return harness
+
+    plan = harness_for("plan")
+    alias = harness_for("deploy", "--plan-only")
+
+    assert plan.streams.json()["status"] == "no-change"
+    assert alias.streams.json()["status"] == plan.streams.json()["status"]
+    assert alias.cloudformation.executed == []
+
+
+def test_plan_only_reports_the_review_shell_the_same_way_plan_does() -> None:
+    plan = InfraHarness()
+    alias = InfraHarness()
+
+    assert plan.invoke("infra", "plan", *PARAMETERS, "--json") == 0
+    assert alias.invoke("infra", "deploy", *PARAMETERS, "--plan-only", "--json") == 0
+
+    assert "REVIEW_IN_PROGRESS" in alias.streams.stderr
+    assert [note for note in alias.streams.json()["notes"] if "REVIEW_IN_PROGRESS" in note] == [
+        note for note in plan.streams.json()["notes"] if "REVIEW_IN_PROGRESS" in note
+    ]
+
+
 def test_deploy_plan_only_is_an_alias_for_plan() -> None:
     harness = InfraHarness()
 

@@ -56,8 +56,28 @@ All notable changes to this project are documented in this file.
   contract, the safety as distinct from the identity of the sealed handler, and,
   because it does not import the handler, whether the handler imports cleanly or
   is callable at all.
-- Credential resolution failures, missing regions, and AWS API refusals are
-  reported as typed refusals with a nonzero exit rather than as tracebacks.
+- Credential resolution failures, missing regions, AWS API refusals, and
+  exceptions raised by the sealed handler itself are reported as typed refusals
+  with a nonzero exit rather than as tracebacks. A handler that raises becomes
+  `SceneHandlerError`; a handler that returns something the runner refuses keeps
+  its own `HandlerContractError`.
+- The review material for a mutating `infra` verb is written to stderr under
+  `--json` rather than suppressed, so an interactive confirmation is never
+  requested without showing the parameter diff and rendered policies. stdout
+  remains a single parseable document.
+- `--external-id` is validated against the character set AWS accepts, not only its
+  length, so a value like `tenant one` is refused offline instead of at
+  `AssumeRole`.
+- `--metadata` is parsed strictly: `NaN`, `Infinity`, and `-Infinity`, which
+  `json.loads` accepts by default, are refused, because publication serializes
+  with `allow_nan=False`. A preflight and a run now agree on metadata validity.
+- A stack name is validated locally against CloudFormation's own narrower rules.
+  The template admits role names containing `_ + = , . @` or starting with a
+  digit, so defaulting the stack name from such a role name is refused with a
+  pointer to `--stack-name` rather than failing at the AWS call.
+- `deploy --plan-only` shares one code path with `plan`, so the documented alias
+  cannot report a different status for a no-op or drop the `REVIEW_IN_PROGRESS`
+  warning.
 - `--profile` and `--region` apply only to the operator's own calls, never to the
   Scene session, which is built from the minted credential and the model ARN's
   region alone. The two boundaries are documented as boundaries: verifying the
@@ -84,7 +104,13 @@ All notable changes to this project are documented in this file.
 - The static check that sealed bytes bind a module-level `handler` cannot prove
   the binding is callable or that the module imports cleanly. Those are only known
   once the bytes execute, which during a run is after the Scene credential has
-  been minted.
+  been minted. The check requires a real binding, so an annotation-only
+  `handler: object` is refused.
+- `SceneHandlerError` includes the sealed handler's own exception text so a failure
+  is debuggable. That text is not screened for credential material, because the
+  handler could have embedded anything in it; it is strictly less exposure than the
+  traceback it replaces, but a handler that formats its session into an exception
+  will still surface it.
 - The sealed handler is read by the trusted bootstrap identity, not by the Scene
   credential, because `run_scene_from_genesis()` compiles reads from `input/`
   only. Executing sealed code therefore still depends on the operator's own read

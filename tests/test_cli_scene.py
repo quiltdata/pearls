@@ -553,6 +553,72 @@ def test_run_refuses_a_genesis_layout_error_before_executing_sealed_bytes(
     assert harness.sts.requests == []
 
 
+def test_a_handler_that_raises_is_a_typed_refusal_not_a_traceback() -> None:
+    """Sealed code failing is an expected outcome, so it exits 1 with a message."""
+    source = (
+        b"def handler(inputs, session, context):\n"
+        b"    raise RuntimeError('the model call fell over')\n"
+    )
+    harness = SceneHarness(GenesisFixture(handler_source=source))
+
+    code = harness.run()
+
+    assert code == 1
+    stderr = harness.streams.stderr
+    assert "SceneHandlerError" in stderr
+    assert "raised RuntimeError: the model call fell over" in stderr
+    assert "Traceback" not in stderr
+    assert harness.streams.stdout == ""
+    # It failed after minting but before publication, so nothing was written.
+    assert harness.worker_s3.put_requests == []
+
+
+def test_a_handler_contract_violation_keeps_its_own_typed_error() -> None:
+    source = b"def handler(inputs, session, context):\n    return 'not a SceneHandlerResult'\n"
+    harness = SceneHarness(GenesisFixture(handler_source=source))
+
+    code = harness.run()
+
+    assert code == 1
+    assert "HandlerContractError" in harness.streams.stderr
+    assert "SceneHandlerError" not in harness.streams.stderr
+
+
+def test_run_refuses_metadata_that_publication_would_reject() -> None:
+    """NaN is accepted by json.loads but refused with allow_nan=False later."""
+    harness = SceneHarness()
+
+    code = harness.run("--metadata", '{"score": NaN}')
+
+    assert code == 1
+    assert "must be standard JSON" in harness.streams.stderr
+    assert "NaN" in harness.streams.stderr
+    assert harness.sts.requests == []
+
+
+@pytest.mark.parametrize(
+    "external_id",
+    ["tenant one", "tenant\tone", "tenant#one"],
+    ids=["space", "tab", "hash"],
+)
+def test_check_refuses_an_external_id_aws_would_reject(external_id: str) -> None:
+    harness = SceneHarness()
+
+    code = harness.check("--external-id", external_id)
+
+    assert code == 1
+    assert "InvalidAssumeRoleRequest" in harness.streams.stderr
+    assert harness.session.requested == []
+
+
+def test_a_valid_external_id_with_allowed_punctuation_is_accepted() -> None:
+    harness = SceneHarness()
+
+    assert harness.run("--external-id", "trial-001:worker/attempt.2", "--json") == 0
+
+    assert harness.sts.requests[0]["ExternalId"] == "trial-001:worker/attempt.2"
+
+
 def test_run_refuses_a_revision_with_no_sealed_handler_before_minting() -> None:
     harness = SceneHarness(GenesisFixture(handler_source=None))
 

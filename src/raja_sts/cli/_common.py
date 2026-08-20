@@ -100,6 +100,15 @@ class Emitter:
         if not self.json_output:
             print(text, file=self.runtime.stdout)
 
+    def review(self, text: str) -> None:
+        """Write one line of material the operator must read before confirming.
+
+        Under ``--json`` this goes to stderr rather than being suppressed, so an
+        interactive confirmation is never asked without showing what is being
+        approved, while stdout stays a single parseable document.
+        """
+        print(text, file=self.runtime.stderr if self.json_output else self.runtime.stdout)
+
     def document(self, payload: Mapping[str, Any]) -> None:
         """Write the stable JSON document to stdout when JSON was requested."""
         if self.json_output:
@@ -173,8 +182,18 @@ def read_json_argument(value: str, *, label: str) -> dict[str, Any]:
             raise CliRefusal(f"{label} file is not readable UTF-8 text: {error}") from error
     else:
         text = value
+
+    def reject_constant(name: str) -> Any:
+        # json.loads accepts NaN/Infinity/-Infinity by default, but publication
+        # serializes with allow_nan=False. Rejecting them here keeps a preflight
+        # honest instead of deferring the failure until after the Scene has run.
+        raise CliRefusal(
+            f"{label} must be standard JSON; {name} is not a valid value and would be "
+            "rejected at publication"
+        )
+
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, parse_constant=reject_constant)
     except json.JSONDecodeError as error:
         raise CliRefusal(f"{label} must be a JSON object: {error}") from error
     if not isinstance(parsed, dict):
@@ -205,10 +224,20 @@ def envelope(schema: str, status: str) -> dict[str, Any]:
     return {"$schema": schema, "status": status, "pearls_version": __version__}
 
 
-def render_table(emitter: Emitter, rows: Sequence[tuple[str, str]]) -> None:
-    """Print aligned ``label: value`` rows on stdout."""
+def render_table(
+    emitter: Emitter,
+    rows: Sequence[tuple[str, str]],
+    *,
+    review: bool = False,
+) -> None:
+    """Print aligned ``label: value`` rows.
+
+    Set ``review`` for material that must survive ``--json`` because the operator
+    is about to be asked to approve it.
+    """
     if not rows:
         return
+    write = emitter.review if review else emitter.line
     width = max(len(label) for label, _ in rows)
     for label, value in rows:
-        emitter.line(f"{label.ljust(width)}  {value}")
+        write(f"{label.ljust(width)}  {value}")

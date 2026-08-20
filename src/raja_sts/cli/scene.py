@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from ..errors import RajaStsError
 from ..manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
 from ..models import ManifestObject, PinnedManifestURI
 from ..policy import DEFAULT_MAX_POLICY_CHARACTERS, parse_bedrock_model
@@ -39,6 +40,15 @@ from ._common import (
 _BOOTSTRAP = "trusted-bootstrap"
 _LOCAL = "local"
 _DEFAULT_WORKFLOW = "<registry default>"
+
+
+class SceneHandlerError(RajaStsError):
+    """The sealed handler itself failed during execution.
+
+    Distinct from :class:`~raja_sts.HandlerContractError`, which means the handler
+    returned something the runner refuses. This means the sealed code raised.
+    """
+
 
 UNPROVEN_CONDITIONS: tuple[str, ...] = (
     "Bedrock account-level access to the requested model cannot be proven without "
@@ -404,7 +414,17 @@ def _deferred_handler(sealed: SealedSource, emitter: Emitter) -> SceneHandler:
         inputs: Mapping[str, Any], session: Any, context: SceneContext
     ) -> SceneHandlerResult:
         emitter.note(f"scene {context.scene_id}: executing {sealed.descriptor.logical_key}")
-        return sealed.load().handler(inputs, session, context)
+        try:
+            return sealed.load().handler(inputs, session, context)
+        except RajaStsError:
+            # Already a typed refusal, including the runner's own contract errors.
+            raise
+        except Exception as error:
+            # Sealed code is arbitrary, so its failures are an expected outcome
+            # rather than a defect in Pearls. Report one instead of a traceback.
+            raise SceneHandlerError(
+                f"sealed {sealed.descriptor.logical_key} raised {type(error).__name__}: {error}"
+            ) from error
 
     return invoke
 

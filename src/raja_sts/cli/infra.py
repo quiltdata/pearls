@@ -40,6 +40,8 @@ from ._template import ROLE_ARN_OUTPUT, RoleTemplate, load_role_template, render
 NAMED_IAM_CAPABILITY = "CAPABILITY_NAMED_IAM"
 DEFAULT_ASSUME_POLICY_NAME = "PearlsSceneAssumeRole"
 _POLL_INTERVAL = 5.0
+# CloudFormation stack names are narrower than the template's RoleName pattern.
+_STACK_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,127}$")
 _NO_CHANGE_FRAGMENTS = ("didn't contain changes", "no updates are to be performed")
 _ABSENT_FRAGMENTS = ("does not exist", "not found")
 _CHANGE_SET_DONE = frozenset({"CREATE_COMPLETE", "FAILED", "DELETE_COMPLETE", "DELETE_FAILED"})
@@ -338,17 +340,40 @@ def _effective_parameters(template: RoleTemplate, supplied: Mapping[str, str]) -
     return effective
 
 
+def _validated_stack_name(name: str, *, derived_from: str | None) -> str:
+    """Check a stack name locally, since CloudFormation's rules are narrower.
+
+    The template admits role names containing ``_ + = , . @`` or starting with a
+    digit, none of which CloudFormation accepts in a stack name. Deriving the
+    stack name would otherwise pass every offline check and fail at the AWS call.
+    """
+    if _STACK_NAME_RE.fullmatch(name):
+        return name
+    if derived_from is None:
+        raise CliRefusal(
+            f"--stack-name {name!r} is not a valid CloudFormation stack name: it must "
+            "start with a letter and contain only letters, digits, and hyphens, up to "
+            "128 characters"
+        )
+    raise CliRefusal(
+        f"the stack name defaulted from --{derived_from} is {name!r}, which "
+        "CloudFormation does not accept: a stack name must start with a letter and "
+        "contain only letters, digits, and hyphens, up to 128 characters. Pass an "
+        "explicit --stack-name."
+    )
+
+
 def _stack_name(args: argparse.Namespace, template: RoleTemplate) -> str:
     """Default the stack name from the role name so the two cannot diverge."""
     if getattr(args, "stack_name", None):
-        return str(args.stack_name)
+        return _validated_stack_name(str(args.stack_name), derived_from=None)
     role_name = getattr(args, "role_name", None)
     if role_name:
-        return str(role_name)
+        return _validated_stack_name(str(role_name), derived_from="role-name")
     default = template.parameters["RoleName"].default if "RoleName" in template.parameters else None
     if default is None:
         raise CliRefusal("supply --stack-name or --role-name")
-    return str(default)
+    return _validated_stack_name(str(default), derived_from="role-name")
 
 
 def _run_cfn_lint(template: RoleTemplate) -> list[str]:
@@ -594,7 +619,13 @@ class _Plan:
         return payload
 
     def render(self, emitter: Emitter) -> None:
-        """Print the review material an operator needs before approving."""
+        """Print the review material an operator needs before approving.
+
+        Written to the review channel, so ``--json`` moves it to stderr instead of
+        suppressing it. A confirmation prompt must never be the first thing an
+        operator sees.
+        """
+        write = emitter.review
         render_table(
             emitter,
             [
@@ -603,38 +634,37 @@ class _Plan:
                 ("operation", self.operation),
                 ("capabilities", NAMED_IAM_CAPABILITY),
             ],
+            review=True,
         )
-        emitter.line("")
-        emitter.line("Parameters:")
+        write("")
+        write("Parameters:")
         for entry in _parameter_diff(
             _stack_parameters(self.existing) if self.existing else {}, self.parameters
         ):
             marker = "~" if entry["changed"] else " "
-            emitter.line(
+            write(
                 f"  {marker} {entry['parameter']}: {entry['current']!r} -> {entry['requested']!r}"
             )
-        emitter.line("")
+        write("")
         if self.no_change:
-            emitter.line("Resource changes: none; the deployed stack already matches.")
+            write("Resource changes: none; the deployed stack already matches.")
         else:
-            emitter.line("Resource changes:")
+            write("Resource changes:")
             for change in _resource_changes(self.described) if self.described else []:
-                emitter.line(
-                    f"  {change['action']} {change['logical_id']} ({change['resource_type']})"
-                )
-            emitter.line(
+                write(f"  {change['action']} {change['logical_id']} ({change['resource_type']})")
+            write(
                 f"  This creates or updates named IAM resources, so {NAMED_IAM_CAPABILITY} "
                 "is passed explicitly."
             )
-        emitter.line("")
+        write("")
         rendered = _rendered_policies(self.template, self.parameters)
-        emitter.line("Rendered trust policy:")
-        emitter.line(json.dumps(rendered["trust_policy"], indent=2, sort_keys=True))
-        emitter.line("Rendered inline role policy:")
-        emitter.line(json.dumps(rendered["inline_policies"], indent=2, sort_keys=True))
-        emitter.line("")
+        write("Rendered trust policy:")
+        write(json.dumps(rendered["trust_policy"], indent=2, sort_keys=True))
+        write("Rendered inline role policy:")
+        write(json.dumps(rendered["inline_policies"], indent=2, sort_keys=True))
+        write("")
         for note in TEMPLATE_NOTES:
-            emitter.line(f"  - {note}")
+            write(f"  - {note}")
 
 
 def _build_plan(
@@ -703,15 +733,22 @@ def _build_plan(
     )
 
 
-def plan_command(runtime: Runtime, args: argparse.Namespace) -> int:
-    """Render a change set for review and delete it again."""
-    emitter = Emitter(runtime, args.json_output)
-    client = build_session(runtime, args).client("cloudformation")
-    plan = _build_plan(runtime, args, verb="plan", emitter=emitter, client=client)
-    plan.render(emitter)
+def _finish_plan(
+    emitter: Emitter,
+    client: Any,
+    plan: _Plan,
+    *,
+    keep_change_set: bool,
+    trailer: str,
+) -> int:
+    """Report a rendered-but-unexecuted plan and clean up after it.
+
+    Shared by ``pearls infra plan`` and ``pearls infra deploy --plan-only`` so the
+    documented alias cannot report a different status or drop a warning.
+    """
     status = "no-change" if plan.no_change else "planned"
     payload = plan.document(INFRA_PLAN_SCHEMA, status)
-    if args.keep_change_set and not plan.no_change:
+    if keep_change_set and not plan.no_change:
         emitter.note(f"change set {plan.change_set_name} was kept and was not executed")
         payload["change_set_retained"] = True
     else:
@@ -721,12 +758,27 @@ def plan_command(runtime: Runtime, args: argparse.Namespace) -> int:
         payload["change_set_retained"] = False
     payload["mutations_performed"] = []
     emitter.line("")
-    emitter.line("This was a plan. No stack resource was created, updated, or deleted.")
+    emitter.line(trailer)
     if plan.operation == "CREATE":
         emitter.note(REVIEW_SHELL_NOTE)
         payload["notes"] = [*payload["notes"], REVIEW_SHELL_NOTE]
     emitter.document(payload)
     return EXIT_OK
+
+
+def plan_command(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Render a change set for review and delete it again."""
+    emitter = Emitter(runtime, args.json_output)
+    client = build_session(runtime, args).client("cloudformation")
+    plan = _build_plan(runtime, args, verb="plan", emitter=emitter, client=client)
+    plan.render(emitter)
+    return _finish_plan(
+        emitter,
+        client,
+        plan,
+        keep_change_set=args.keep_change_set,
+        trailer="This was a plan. No stack resource was created, updated, or deleted.",
+    )
 
 
 def _failure_reasons(client: Any, stack_name: str) -> list[str]:
@@ -801,16 +853,13 @@ def deploy_command(runtime: Runtime, args: argparse.Namespace) -> int:
     plan.render(emitter)
 
     if args.plan_only:
-        _delete_change_set(
-            emitter, client, name=plan.change_set_name or "", stack_name=plan.stack_name
+        return _finish_plan(
+            emitter,
+            client,
+            plan,
+            keep_change_set=False,
+            trailer="--plan-only: nothing was executed.",
         )
-        payload = plan.document(INFRA_PLAN_SCHEMA, "planned")
-        payload["change_set_retained"] = False
-        payload["mutations_performed"] = []
-        emitter.line("")
-        emitter.line("--plan-only: nothing was executed.")
-        emitter.document(payload)
-        return EXIT_OK
 
     if plan.no_change:
         _delete_change_set(
