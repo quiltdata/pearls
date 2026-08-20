@@ -15,6 +15,14 @@ from .errors import PublicationError
 from .models import OutputPackage
 
 
+def _put_versioned(s3_client: Any, **request: Any) -> str:
+    response = s3_client.put_object(**request)
+    version_id = response.get("VersionId")
+    if not isinstance(version_id, str) or not version_id or version_id == "null":
+        raise PublicationError(f"S3 did not version output object {request['Key']!r}")
+    return version_id
+
+
 def publish_package(
     *,
     s3_client: Any,
@@ -22,25 +30,28 @@ def publish_package(
     objects: Mapping[str, bytes],
     timestamp: datetime,
 ) -> str:
-    """Publish a Quilt v1 package without listing or ambient AWS credentials.
+    """Publish a Quilt v1 package to a versioned bucket without listing.
 
-    Data objects are written first, followed by Quilt's canonical immutable
-    manifest and a timestamped revision pointer. The create-only named
-    ``latest`` pointer is always last.
+    Bucket versioning is checked before the first write and every write must
+    return a version ID. Data objects are written first, followed by Quilt's
+    canonical immutable manifest and a timestamped revision pointer. The
+    create-only named ``latest`` pointer is always last.
     """
     try:
+        versioning = s3_client.get_bucket_versioning(Bucket=output.bucket)
+        if versioning.get("Status") != "Enabled":
+            raise PublicationError(f"Output bucket {output.bucket!r} must have versioning enabled")
+
         package = Package()
         for logical_key in sorted(objects):
             body = objects[logical_key]
             physical_key = f"{output.name}/{logical_key}"
-            response = s3_client.put_object(
+            version_id = _put_versioned(
+                s3_client,
                 Bucket=output.bucket,
                 Key=physical_key,
                 Body=body,
             )
-            version_id = response.get("VersionId")
-            if version_id is not None and not isinstance(version_id, str):
-                raise TypeError("S3 returned a non-string VersionId")
             package.set(
                 logical_key,
                 PackageEntry(
@@ -65,23 +76,28 @@ def publish_package(
 
         pointer_body = top_hash.encode("ascii")
         pointer_prefix = f".quilt/named_packages/{output.name}"
-        s3_client.put_object(
+        _put_versioned(
+            s3_client,
             Bucket=output.bucket,
             Key=f".quilt/packages/{top_hash}",
             Body=manifest,
             ContentType="application/jsonl",
         )
-        s3_client.put_object(
+        _put_versioned(
+            s3_client,
             Bucket=output.bucket,
             Key=f"{pointer_prefix}/{int(timestamp.timestamp())}",
             Body=pointer_body,
         )
-        s3_client.put_object(
+        _put_versioned(
+            s3_client,
             Bucket=output.bucket,
             Key=f"{pointer_prefix}/latest",
             Body=pointer_body,
             IfNoneMatch="*",
         )
         return top_hash
+    except PublicationError:
+        raise
     except Exception as error:
         raise PublicationError(f"Unable to publish bounded output package: {error}") from error

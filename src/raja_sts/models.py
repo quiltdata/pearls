@@ -55,6 +55,11 @@ class OutputPackage:
     bucket: str
 
     @property
+    def bucket_arn(self) -> str:
+        """Return the output bucket ARN used for versioning checks."""
+        return f"arn:aws:s3:::{self.bucket}"
+
+    @property
     def data_prefix(self) -> str:
         """Return the deterministic data prefix used by Quilt's default push layout."""
         return f"{self.name}/"
@@ -95,8 +100,8 @@ class CompiledPolicy:
     readable_selectors: tuple[str, ...]
     selected_objects: tuple[ManifestObject, ...]
     output_package: OutputPackage
-    bedrock_model_arn: str | None = None
     warnings: tuple[str, ...] = ()
+    bedrock_model_arn: str | None = None
 
     @property
     def size(self) -> int:

@@ -113,6 +113,14 @@ def _write_statement(output: OutputPackage) -> dict[str, Any]:
     }
 
 
+def _output_versioning_statement(output: OutputPackage) -> dict[str, Any]:
+    return {
+        "Effect": "Allow",
+        "Action": "s3:GetBucketVersioning",
+        "Resource": output.bucket_arn,
+    }
+
+
 def _bedrock_statement(model_arn: str | None) -> list[dict[str, Any]]:
     if model_arn is None:
         return []
@@ -263,7 +271,13 @@ def compile(
     guardrails = _guardrail_statements(current_read_resources, output)
     model_statement = _bedrock_statement(bedrock_model_arn)
     document, policy_json = _serialize(
-        [*guardrails, *read_statements, *model_statement, _write_statement(output)]
+        [
+            *guardrails,
+            *read_statements,
+            _output_versioning_statement(output),
+            *model_statement,
+            _write_statement(output),
+        ]
     )
     warnings: tuple[str, ...] = ()
     if missing_versions:
@@ -293,7 +307,13 @@ def compile(
         ]
         guardrails = _guardrail_statements([*prefix_resources, *metadata_read_resources], output)
         document, policy_json = _serialize(
-            [*guardrails, *read_statements, *model_statement, _write_statement(output)]
+            [
+                *guardrails,
+                *read_statements,
+                _output_versioning_statement(output),
+                *model_statement,
+                _write_statement(output),
+            ]
         )
         if len(policy_json) > max_policy_characters:
             raise PolicySizeError(

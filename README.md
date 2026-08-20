@@ -253,7 +253,7 @@ remains separately authorized.
 STS limits an inline session policy to 2,048 plaintext characters. Exact mode
 uses set-based version-ID and resource lists rather than two statements per
 object, then minifies and measures the JSON before calling AWS. The five-object
-Scene regression compiles to 1,674 characters with all required Quilt metadata
+Scene regression compiles to 1,767 characters with all required Quilt metadata
 reads and remains version-pinned. The compiler fails closed with
 `PolicySizeError` when a larger policy does not fit.
 
@@ -287,16 +287,20 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
     OrchestratorPrincipalArn=arn:aws:iam::123456789012:role/orchestrator \
-    ProjectBucketArnPattern=arn:aws:s3:::my-project-*
+    ProjectBucketArnPattern=arn:aws:s3:::my-project-* \
+    BedrockModelArn=arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0
 ```
 
-Review the rendered IAM policy before deployment. The orchestrator needs
-`sts:AssumeRole` permission as well as the role's trust. The template targets
-the commercial `aws` partition in 0.1.1. `mint(external_id=...)` is available
-for separately managed roles whose trust policy requires `sts:ExternalId`; the
-shipped same-account template does not require one. The worker must not be able
-to retrieve broader ambient task, instance, or execution-role credentials;
-otherwise it can bypass the scoped credentials entirely.
+Review the rendered IAM policy before deployment. `BedrockModelArn` must be the
+same exact foundation-model ARN selected by the sealed Scene scope; a mismatch
+fails closed because the effective permission is the intersection of the base
+role and session policy. The orchestrator needs `sts:AssumeRole` permission as
+well as the role's trust. The template targets the commercial `aws` partition
+in 0.1.1. `mint(external_id=...)` is available for separately managed roles
+whose trust policy requires `sts:ExternalId`; the shipped same-account template
+does not require one. The worker must not be able to retrieve broader ambient
+task, instance, or execution-role credentials; otherwise it can bypass the
+scoped credentials entirely.
 
 ### Live AWS authorization proof
 
@@ -351,9 +355,12 @@ run.
 
 ### Security and maturity boundaries
 
-- `s3:PutObject` excludes deletes but can overwrite a key by creating a new
-  current version. Strong append-only semantics require unique keys plus
-  bucket versioning, Object Lock, conditional writes, or a trusted finalizer.
+- The publisher requires output bucket versioning before its first write and
+  requires every S3 write to return a non-null version ID. Concurrent writers
+  can create unreferenced object versions, but the winning `latest` manifest
+  continues to pin the exact data versions it published. Bucket Object Lock or
+  bucket-policy controls remain necessary to prevent unrelated principals from
+  replacing or deleting versions.
 - The broad `.quilt/packages/*` output namespace is required because a new
   manifest's content hash is unknown before the worker builds it. Quilt3's
   content-addressed API contract derives that key from the manifest bytes;

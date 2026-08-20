@@ -161,7 +161,7 @@ def _contains_secret(value: object, secret_values: frozenset[str]) -> bool:
 
 def _validate_handler_result(
     result: object, secret_values: frozenset[str]
-) -> tuple[dict[str, bytes], Mapping[str, Any]]:
+) -> tuple[dict[str, bytes], bytes]:
     if not isinstance(result, SceneHandlerResult):
         raise HandlerContractError("handler must return SceneHandlerResult")
     if not isinstance(result.objects, Mapping) or not result.objects:
@@ -179,12 +179,12 @@ def _validate_handler_result(
     if _contains_secret(result.invocation, secret_values):
         raise HandlerContractError("handler invocation metadata contains credential material")
     try:
-        json.dumps(result.invocation, allow_nan=False)
+        invocation_bytes = _json_bytes(dict(result.invocation))
     except (TypeError, ValueError) as error:
         raise HandlerContractError(
             f"handler invocation metadata must be JSON-serializable: {error}"
         ) from error
-    return objects, result.invocation
+    return objects, invocation_bytes
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -250,7 +250,7 @@ def run_scene(
     context = SceneContext(scene_id=scene_id, compilation=compilation)
     handler_result = handler(inputs, session, context)
     secret_values = frozenset(credentials.boto3_kwargs().values())
-    objects, invocation = _validate_handler_result(handler_result, secret_values)
+    objects, invocation_bytes = _validate_handler_result(handler_result, secret_values)
     completed_at = clock()
 
     scene_record: dict[str, Any] = {
@@ -286,7 +286,7 @@ def run_scene(
         },
     }
     objects["run/scene.json"] = _json_bytes(scene_record)
-    objects["run/invocation.json"] = _json_bytes(dict(invocation))
+    objects["run/invocation.json"] = invocation_bytes
     top_hash = publish_package(
         s3_client=s3_client,
         output=compilation.output_package,

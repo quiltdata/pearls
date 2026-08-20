@@ -19,9 +19,9 @@ All notable changes to this project are documented in this file.
   non-secret authority, lineage, audit identity, invocation, and timestamp
   metadata.
 - Added an explicit-session, Quilt-backed v1 publication adapter that uses
-  Quilt's canonical Package manifest and top-hash implementation, writes output
-  data and named pointers without bucket listing or deletion, and performs a
-  create-only conditional `latest` write last.
+  Quilt's canonical Package manifest and top-hash implementation, requires a
+  versioned output bucket and version IDs from every write, and performs no
+  bucket listing or deletion; `latest` remains the final arbitration write.
 
 ### Security
 
@@ -41,7 +41,8 @@ All notable changes to this project are documented in this file.
 - V1 runs exactly one handler without retries, streaming, tools, task graphs,
   cleanup, promotion, KMS integration, or generalized model-provider support.
 - Output lineage is declared in the execution record but is not a
-  cryptographic proof. Failed publication can leave immutable objects for
+  cryptographic proof. Failed or losing concurrent publications can leave
+  unreferenced object versions, immutable manifests, or revision pointers for
   administrator lifecycle cleanup because Scene credentials cannot delete.
 
 ## [0.1.0] - 2026-08-19
@@ -52,7 +53,7 @@ All notable changes to this project are documented in this file.
   revisions and sealed logical read/output scopes.
 - Added compact, set-based exact S3 object/version policy generation,
   deterministic minified JSON, compilation reports, and a fail-closed
-  2,048-character STS preflight. A five-object Scene remains exact at 1,674
+  2,048-character STS preflight. A five-object Scene remains exact at 1,767
   characters instead of requiring prefix fallback.
 - Added an explicit, reportable physical-prefix fallback for callers that
   knowingly accept widened read authority.

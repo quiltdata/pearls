@@ -49,6 +49,7 @@ class FakeS3:
         self.returned_version = returned_version
         self.put_error = put_error
         self.get_requests: list[dict[str, Any]] = []
+        self.versioning_requests: list[dict[str, Any]] = []
         self.put_requests: list[dict[str, Any]] = []
         self.body: Body | None = None
 
@@ -57,6 +58,11 @@ class FakeS3:
         self.get_requests.append(kwargs)
         self.body = Body(self.content) if isinstance(self.content, bytes) else self.content  # type: ignore[assignment]
         return {"Body": self.body, "VersionId": self.returned_version}
+
+    def get_bucket_versioning(self, **kwargs: Any) -> dict[str, str]:
+        self.events.append("get_bucket_versioning")
+        self.versioning_requests.append(kwargs)
+        return {"Status": "Enabled"}
 
     def put_object(self, **kwargs: Any) -> dict[str, str]:
         self.events.append(f"put:{kwargs['Key']}")
@@ -240,19 +246,23 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert session.bedrock.requests[0]["modelId"] == MODEL_ARN
 
     keys = [request["Key"] for request in s3.put_requests]
+    assert s3.versioning_requests == [{"Bucket": "output-bucket"}]
     assert keys[:4] == [
         "project/scene-output/result/prompt.txt",
         "project/scene-output/result/response.txt",
         "project/scene-output/run/invocation.json",
         "project/scene-output/run/scene.json",
     ]
+    assert all("IfNoneMatch" not in request for request in s3.put_requests[:-1])
+    assert s3.put_requests[-1]["IfNoneMatch"] == "*"
     assert keys[-1] == ".quilt/named_packages/project/scene-output/latest"
     assert keys[-3].startswith(".quilt/packages/")
     assert keys[-2] == ".quilt/named_packages/project/scene-output/1787140860"
 
     by_key = {request["Key"]: request["Body"] for request in s3.put_requests}
     scene_record = json.loads(by_key["project/scene-output/run/scene.json"])
-    invocation = json.loads(by_key["project/scene-output/run/invocation.json"])
+    invocation_body = by_key["project/scene-output/run/invocation.json"]
+    invocation = json.loads(invocation_body)
     assert scene_record["$schema"].endswith("/v1")
     assert scene_record["scene_id"] == "scene-3"
     assert scene_record["input"]["top_hash"] == "a" * 64
@@ -260,6 +270,13 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert scene_record["authority"]["bedrock_model_arn"] == MODEL_ARN
     assert scene_record["assumed_role"]["id"] == "AROATEST:scene-3"
     assert invocation["request_id"] == "request-1"
+    assert invocation_body.endswith(b"\n")
+    assert (
+        invocation_body
+        == (
+            json.dumps(invocation, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        ).encode()
+    )
     serialized_records = json.dumps([scene_record, invocation])
     assert "temporary-access" not in serialized_records
     assert "temporary-secret" not in serialized_records
@@ -359,6 +376,13 @@ def test_runner_fails_closed_on_input_integrity(
                 {"authorization": "Bearer temporary-token"},
             ),
             "credential",
+        ),
+        (
+            SceneHandlerResult(
+                {"result.txt": b"x"},
+                {"a": 1, 2: "b"},  # type: ignore[dict-item]
+            ),
+            "JSON-serializable",
         ),
         (SceneHandlerResult({"result.txt": b"x"}, {"value": float("nan")}), "JSON-serializable"),
     ],
