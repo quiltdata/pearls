@@ -94,11 +94,13 @@ All notable changes to this project are documented in this file.
   AWS calls Pearls makes directly.
 - `pearls infra plan` creates and then deletes a CloudFormation change set; the
   change set itself is an API object, even though no stack resource is created,
-  updated, or deleted. `--keep-change-set` retains it for out-of-band review.
-  Planning a stack name that does not exist yet leaves that stack in
-  `REVIEW_IN_PROGRESS` with no resources; the command reports this, and removing an
-  abandoned shell is an explicit administrator action because no verb here can
-  delete.
+  updated, or deleted. `--keep-change-set` retains it for out-of-band review. A
+  change set that is never executed, because the operator declined, stdin could
+  not answer, or the call failed, is deleted before the command exits; an executed
+  one is left in the stack's history. Planning or abandoning a deploy for a stack
+  name that does not exist yet leaves that stack in `REVIEW_IN_PROGRESS` with no
+  resources; the commands report this, and removing an abandoned shell is an
+  explicit administrator action because no verb here can delete a stack.
 - `deploy` confirms an executed change by waiting for CloudFormation to leave the
   stack's pre-execution state, using `LastUpdatedTime` and observed in-progress
   statuses. If neither changes within `--wait-seconds` it reports that the outcome

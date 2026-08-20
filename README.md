@@ -512,12 +512,14 @@ pearls infra validate \
 
 `pearls infra plan` creates a change set, prints the parameter diff, the resource
 changes, and the rendered trust policy and inline role policy, then deletes the
-change set. It never executes it and changes no stack resource. Planning a stack
-name that does not exist yet is the one visible side effect: CloudFormation
-creates the stack in `REVIEW_IN_PROGRESS` with no resources, and the command says
-so, because no `pearls` verb has delete authority. A later `deploy` of the same
-stack name proceeds normally. `pearls infra deploy` renders the same review
-material, requires confirmation unless `--yes`,
+change set. It never executes it and changes no stack resource. A change set that
+is never executed is always deleted before the command exits, whether it was
+planned, declined, or failed to launch; only an executed one is left in the
+stack's history. Planning a stack name that does not exist yet is the one visible
+side effect: CloudFormation creates the stack in `REVIEW_IN_PROGRESS` with no
+resources, and the command says so, because no `pearls` verb has delete authority.
+A later `deploy` of the same stack name proceeds normally. `pearls infra deploy`
+renders the same review material, requires confirmation unless `--yes`,
 passes `CAPABILITY_NAMED_IAM` explicitly, waits for a terminal stack status, and
 prints `SceneExecutionRoleArn` in a form usable directly as
 `pearls scene run --role-arn`. Re-running `deploy` with unchanged parameters is a

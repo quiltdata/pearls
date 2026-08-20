@@ -829,21 +829,35 @@ def deploy_command(runtime: Runtime, args: argparse.Namespace) -> int:
         emitter.document(payload)
         return EXIT_OK
 
-    confirm(
-        runtime,
-        question=(
-            f"Execute this change set against stack {plan.stack_name!r} and create or "
-            f"update named IAM resources with {NAMED_IAM_CAPABILITY}?"
-        ),
-        assume_yes=args.assume_yes,
-    )
-
+    # A change set that is never executed must not outlive the command, whether
+    # the operator declined, stdin could not answer, or the call failed. Once
+    # CloudFormation accepts it for execution it belongs to the stack's history,
+    # so success deliberately leaves it in place.
+    executed = False
     try:
+        confirm(
+            runtime,
+            question=(
+                f"Execute this change set against stack {plan.stack_name!r} and create or "
+                f"update named IAM resources with {NAMED_IAM_CAPABILITY}?"
+            ),
+            assume_yes=args.assume_yes,
+        )
         client.execute_change_set(ChangeSetName=plan.change_set_name, StackName=plan.stack_name)
+        executed = True
+    except CliRefusal:
+        raise
     except Exception as error:
         raise CliRefusal(
             f"unable to execute the change set for {plan.stack_name!r}: {error}"
-        ) from (error)
+        ) from error
+    finally:
+        if not executed:
+            _delete_change_set(
+                emitter, client, name=plan.change_set_name or "", stack_name=plan.stack_name
+            )
+            if plan.operation == "CREATE":
+                emitter.note(REVIEW_SHELL_NOTE)
     emitter.note(f"executing change set {plan.change_set_name} against {plan.stack_name}")
 
     stack = _await_stack(

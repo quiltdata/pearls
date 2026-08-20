@@ -559,6 +559,55 @@ def test_deploy_fails_closed_when_stdin_cannot_answer() -> None:
     assert harness.cloudformation.executed == []
 
 
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [(("no",), "confirmation declined"), ((), "re-run with --yes")],
+    ids=["declined", "no-stdin"],
+)
+def test_an_unapproved_change_set_does_not_outlive_the_command(
+    answers: tuple[str, ...], expected: str
+) -> None:
+    """A change set the operator never approved must be cleaned up."""
+    harness = InfraHarness()
+
+    code = harness.invoke("infra", "deploy", *PARAMETERS, answers=answers)
+
+    assert code == 1
+    assert expected in harness.streams.stderr
+    assert harness.cloudformation.executed == []
+    assert harness.cloudformation.deleted[0]["StackName"] == ROLE_NAME
+    assert harness.cloudformation.deleted[0]["ChangeSetName"].startswith("pearls-deploy-")
+
+
+def test_abandoning_a_new_stack_reports_the_review_shell_it_leaves_behind() -> None:
+    harness = InfraHarness()
+
+    assert harness.invoke("infra", "deploy", *PARAMETERS, answers=("no",)) == 1
+
+    # The change set is gone, but the empty stack shell needs an administrator.
+    assert "REVIEW_IN_PROGRESS" in harness.streams.stderr
+
+
+def test_abandoning_an_update_does_not_mention_a_review_shell() -> None:
+    harness = InfraHarness(cloudformation=FakeCloudFormation(stacks=deployed_stack()))
+
+    assert harness.invoke("infra", "deploy", *PARAMETERS, answers=("no",)) == 1
+
+    assert harness.cloudformation.deleted != []
+    assert "REVIEW_IN_PROGRESS" not in harness.streams.stderr
+
+
+def test_an_executed_change_set_is_left_in_the_stack_history() -> None:
+    harness = InfraHarness(
+        cloudformation=FakeCloudFormation(stacks=deployed_stack(), statuses=["CREATE_COMPLETE"])
+    )
+
+    assert harness.invoke("infra", "deploy", *PARAMETERS, "--yes") == 0
+
+    assert harness.cloudformation.executed != []
+    assert harness.cloudformation.deleted == []
+
+
 def test_deploy_executes_the_change_set_and_reports_the_role_arn() -> None:
     harness = InfraHarness(
         cloudformation=FakeCloudFormation(
@@ -715,7 +764,7 @@ def test_deploy_reports_a_failure_even_when_stack_events_are_unavailable() -> No
     assert "stack events unavailable" in harness.streams.stderr
 
 
-def test_deploy_surfaces_a_change_set_that_cannot_be_executed() -> None:
+def test_deploy_surfaces_a_change_set_that_cannot_be_executed_and_cleans_it_up() -> None:
     harness = InfraHarness(
         cloudformation=FakeCloudFormation(execute_error=RuntimeError("InsufficientCapabilities"))
     )
@@ -724,6 +773,8 @@ def test_deploy_surfaces_a_change_set_that_cannot_be_executed() -> None:
 
     assert code == 1
     assert "unable to execute the change set" in harness.streams.stderr
+    # The change set was never accepted for execution, so it must not survive.
+    assert harness.cloudformation.deleted != []
 
 
 def test_deploy_stops_waiting_and_says_the_stack_is_still_in_progress() -> None:
