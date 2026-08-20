@@ -4,6 +4,46 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.2] - 2026-08-19
+
+### Added
+
+- Added `run_scene_from_genesis()`, which boots a Scene from one top-hash-pinned
+  Quilt package, derives exact reads from its `input/` entries, exposes its
+  UTF-8 `README.md` as `SceneContext.control_prompt`, and compiles its
+  `outputs.json` as the write grant.
+- Added the `{unpinned quilt+s3 URI: description}` output grammar. URI paths
+  distinguish whole-package, trailing-slash subtree, and exact-object grants
+  while retaining `writable_package` for the low-level compatibility API.
+- Added selector-aware output validation and deterministic authority reporting
+  for genesis-derived runs.
+
+### Security
+
+- Genesis control objects are read by exact S3 version and verified against
+  their Quilt content hashes before STS credentials are minted.
+- Write selectors must target one package and may not overlap. Exact-object and
+  subtree grants cannot select the runner-owned `run/scene.json` or
+  `run/invocation.json` records; returned handler objects cannot replace those
+  records even under a whole-package grant. Narrow grants receive only their
+  declared data resources plus the exact runtime records and required Quilt
+  publication namespaces.
+- Handler output keys are checked against the immutable genesis write scope
+  before any package object is published.
+
+### Known limitations
+
+- Handlers execute in-process as trusted code and receive the same scoped
+  session used for publication. Selector and reserved-key validation applies
+  to returned objects; isolating a malicious handler from direct S3 calls or
+  retained credentials requires a separate execution plane.
+- A genesis package supports one output Quilt package per run. Cross-package
+  output grants and promotion remain outside the runner contract.
+- The trusted bootstrap identity reads `README.md` and `outputs.json` before
+  Scene credentials exist. The genesis top hash must not be described as
+  tamper-enforced until Quilt manifest retrieval verifies downloaded bytes
+  against the requested top hash (quiltdata/quilt#5181).
+
 ## [0.1.1] - 2026-08-19
 
 ### Added

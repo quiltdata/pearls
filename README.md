@@ -227,6 +227,61 @@ The package always includes handler objects, `run/scene.json`, and
 for a thin one-Converse consumer. Prompt and response bodies remain explicit
 package objects rather than implicit metadata.
 
+### Boot from one genesis package
+
+`run_scene_from_genesis()` makes one pinned package the complete Scene brief.
+The package must contain a UTF-8 `README.md`, an `outputs.json` control object,
+and at least one entry below `input/`. The handler receives only the `input/`
+entries in its `inputs` mapping and reads the control prompt from
+`context.control_prompt`:
+
+```json
+{
+  "quilt+s3://my-project-bucket/results/#package=scenes%2Frun-123%2Foutput": "result tree",
+  "quilt+s3://my-project-bucket/summary.json#package=scenes%2Frun-123%2Foutput": "exact summary"
+}
+```
+
+An `outputs.json` key is an unpinned output destination, not input authority.
+No URI path grants the whole package, a trailing `/` grants a logical subtree,
+and any other path grants one exact logical object. All entries must target one
+package and must not overlap. Exact-object and subtree selectors may not cover
+`run/scene.json` or `run/invocation.json`; those runner-owned keys are always
+rejected from returned handler objects, including under a whole-package grant.
+
+```python
+from raja_sts import SceneHandlerResult, run_scene_from_genesis
+
+
+def genesis_handler(inputs, session, context):
+    prompt = context.control_prompt
+    assert prompt is not None
+    return SceneHandlerResult(
+        objects={"results/answer.txt": prompt},
+        invocation={"input_count": len(inputs)},
+    )
+
+
+result = run_scene_from_genesis(
+    manifest_uri,
+    role_arn="arn:aws:iam::123456789012:role/scene-execution",
+    scene_id="scene-run-123",
+    handler=genesis_handler,
+    bedrock_model="arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0",
+)
+```
+
+The `bedrock_model` is deliberately supplied by the execution plane and
+recorded in the authority report; it is not derived from the sealed genesis
+package. The trusted bootstrap identity resolves the pinned manifest and reads
+the two control objects by exact version before minting the worker credential.
+Their Quilt hashes are verified. Handlers run in-process as trusted execution
+code: they receive the scoped session that publication later uses, so selector
+and reserved-key checks constrain returned objects but are not a sandbox
+against a handler that makes direct S3 calls or retains the session. The
+low-level `run_scene(manifest_uri, scope_spec, ...)` API remains available
+unchanged.
+
 ### Mapping to the four Scene roles
 
 | Scene role | AWS-native enforcement |

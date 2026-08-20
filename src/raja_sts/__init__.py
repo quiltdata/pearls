@@ -13,7 +13,7 @@ from .errors import (
     PublicationError,
     RajaStsError,
 )
-from .models import CompiledPolicy, ManifestObject, ScopedCredentials
+from .models import CompiledPolicy, ManifestObject, OutputSelector, ScopedCredentials
 from .policy import compile
 from .runner import (
     MaterializedInput,
@@ -22,6 +22,7 @@ from .runner import (
     SceneHandlerResult,
     SceneRunResult,
     run_scene,
+    run_scene_from_genesis,
 )
 from .sts import mint, mint_compiled
 
@@ -37,6 +38,7 @@ __all__ = [
     "ManifestObject",
     "MaterializedInput",
     "MintError",
+    "OutputSelector",
     "PolicySizeError",
     "PublicationError",
     "RajaStsError",
@@ -49,6 +51,7 @@ __all__ = [
     "mint",
     "mint_compiled",
     "run_scene",
+    "run_scene_from_genesis",
 ]
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

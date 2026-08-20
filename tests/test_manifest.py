@@ -8,7 +8,12 @@ import quilt3
 from conftest import MANIFEST_URI, TOP_HASH
 
 from raja_sts import InvalidManifestURI, InvalidScopeError, ManifestLoadError
-from raja_sts.manifest import load_quilt_manifest, parse_manifest_uri, parse_output_package
+from raja_sts.manifest import (
+    load_quilt_manifest,
+    parse_manifest_uri,
+    parse_output_package,
+    parse_output_selectors,
+)
 from raja_sts.models import PinnedManifestURI
 
 
@@ -197,3 +202,65 @@ def test_null_s3_version_is_treated_as_unversioned(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr(quilt3.Package, "browse", lambda *args, **kwargs: package)
     assert load_quilt_manifest(parse_manifest_uri(MANIFEST_URI))[0].version_id is None
+
+
+def test_parse_output_selectors_supports_package_subtree_and_object_shapes() -> None:
+    whole = parse_output_selectors(
+        {"quilt+s3://output-bucket#package=project%2Foutput": "all generated files"}
+    )
+    assert [(item.kind, item.path) for item in whole] == [("package", "")]
+    assert whole[0].data_resource == "arn:aws:s3:::output-bucket/project/output/*"
+    assert whole[0].admits("anything.txt")
+
+    narrowed = parse_output_selectors(
+        {
+            "quilt+s3://output-bucket/results/#package=project%2Foutput": "result tree",
+            "quilt+s3://output-bucket/summary.json#package=project%2Foutput": "summary",
+        }
+    )
+    assert [(item.kind, item.path) for item in narrowed] == [
+        ("subtree", "results/"),
+        ("object", "summary.json"),
+    ]
+    assert narrowed[0].admits("results/a.txt")
+    assert not narrowed[0].admits("result/a.txt")
+    assert narrowed[1].data_resource.endswith("/project/output/summary.json")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {},
+        [],
+        {1: "description"},
+        {"quilt+s3://output-bucket#package=project%2Foutput": ""},
+        {"s3://output-bucket#package=project%2Foutput": "description"},
+        {"quilt+s3://ab#package=project%2Foutput": "description"},
+        {"quilt+s3://user@output-bucket#package=project%2Foutput": "description"},
+        {"quilt+s3://output-bucket?x=1#package=project%2Foutput": "description"},
+        {"quilt+s3://output-bucket#package=project%2Foutput&top_hash=" + TOP_HASH: "description"},
+        {"quilt+s3://output-bucket/%ZZ#package=project%2Foutput": "description"},
+        {"quilt+s3://output-bucket/../escape#package=project%2Foutput": "description"},
+        {"quilt+s3://output-bucket/run/#package=project%2Foutput": "description"},
+        {"quilt+s3://output-bucket/run/scene.json#package=project%2Foutput": "description"},
+        {
+            "quilt+s3://output-bucket#package=project%2Foutput": "all",
+            "quilt+s3://output-bucket/results/#package=project%2Foutput": "nested",
+        },
+        {
+            "quilt+s3://output-bucket/results/#package=project%2Foutput": "parent",
+            "quilt+s3://output-bucket/results/a.txt#package=project%2Foutput": "child",
+        },
+        {
+            "quilt+s3://output-bucket/results/a/#package=project%2Foutput": "child first",
+            "quilt+s3://output-bucket/results/#package=project%2Foutput": "parent second",
+        },
+        {
+            "quilt+s3://output-bucket/a#package=project%2Foutput": "one",
+            "quilt+s3://other-bucket/b#package=project%2Foutput": "two",
+        },
+    ],
+)
+def test_parse_output_selectors_rejects_unsafe_or_ambiguous_grants(value: object) -> None:
+    with pytest.raises(InvalidScopeError):
+        parse_output_selectors(value)
