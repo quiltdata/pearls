@@ -7,7 +7,7 @@ import pytest
 from conftest import MANIFEST_URI, TOP_HASH
 
 from raja_sts import InvalidScopeError, ManifestObject, PolicySizeError, compile
-from raja_sts.models import PinnedManifestURI
+from raja_sts.models import CompiledPolicy, PinnedManifestURI
 
 
 def _actions(policy: dict[str, object]) -> set[str]:
@@ -39,7 +39,13 @@ def test_compile_maps_logical_scope_to_exact_versioned_resources(
     reads = [
         item for item in statements if item["Effect"] == "Allow" and "Get" in str(item["Action"])
     ]
-    assert len(reads) == 2
+    assert len(reads) == 3
+    versioning_read = next(item for item in reads if item["Action"] == "s3:GetBucketVersioning")
+    assert versioning_read == {
+        "Effect": "Allow",
+        "Action": "s3:GetBucketVersioning",
+        "Resource": "arn:aws:s3:::output-bucket",
+    }
     version_read = next(item for item in reads if item["Action"] == "s3:GetObjectVersion")
     assert version_read["Resource"] == [
         "arn:aws:s3:::input-bucket/sealed/data.csv",
@@ -80,7 +86,7 @@ def test_five_object_scene_stays_exact_and_under_sts_limit(manifest_loader) -> N
 
     assert result.mode == "per-object-version"
     assert len(result.selected_objects) == 5
-    assert result.size == 1674
+    assert result.size == 1767
     version_denies = [
         statement
         for statement in result.document["Statement"]
@@ -148,6 +154,7 @@ def test_compile_allows_only_put_in_output_namespaces_and_explicitly_denies_bypa
             statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
         )
     }
+    assert "s3:GetBucketVersioning" in allowed_actions
     assert "s3:ListBucket" not in allowed_actions
     assert not any(
         action.startswith("iam:") or action.startswith("sts:")
@@ -323,3 +330,81 @@ def test_policy_limit_must_stay_within_the_aws_hard_limit(
             manifest_loader=manifest_loader,
             max_policy_characters=limit,  # type: ignore[arg-type]
         )
+
+
+MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+
+
+def test_compile_admits_only_one_exact_bedrock_model(manifest_loader) -> None:
+    result = compile(
+        MANIFEST_URI,
+        {
+            "readable": ["input-content/data.csv"],
+            "writable_package": "project/output@output-bucket",
+            "require_version_ids": True,
+            "bedrock_model": MODEL_ARN,
+        },
+        manifest_loader=manifest_loader,
+    )
+
+    statements = result.document["Statement"]
+    model_statements = [
+        statement for statement in statements if statement.get("Action") == "bedrock:InvokeModel"
+    ]
+    assert model_statements == [
+        {"Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": MODEL_ARN}
+    ]
+    assert result.bedrock_model_arn == MODEL_ARN
+    assert result.report()["bedrock_model_arn"] == MODEL_ARN
+    assert "bedrock:*" not in result.policy_json
+    assert "anthropic.claude" not in result.policy_json
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "*",
+        "arn:aws:bedrock:us-east-1::foundation-model/*",
+        "arn:aws-cn:bedrock:cn-north-1::foundation-model/example",
+        "arn:aws:bedrock:us-east-1:123456789012:custom-model/example",
+        "arn:aws:bedrock:us-east-1::inference-profile/example",
+        3,
+    ],
+)
+def test_compile_rejects_non_exact_or_unsupported_bedrock_resources(
+    manifest_loader, model: object
+) -> None:
+    with pytest.raises(InvalidScopeError, match="bedrock_model"):
+        compile(
+            MANIFEST_URI,
+            {
+                "readable": ["input-content/data.csv"],
+                "writable_package": "project/output@output-bucket",
+                "bedrock_model": model,
+            },
+            manifest_loader=manifest_loader,
+        )
+
+
+def test_compiled_policy_preserves_legacy_positional_warnings(manifest_loader) -> None:
+    compiled = compile(
+        MANIFEST_URI,
+        {
+            "readable": ["input-content/data.csv"],
+            "writable_package": "project/output@output-bucket",
+        },
+        manifest_loader=manifest_loader,
+    )
+    legacy = CompiledPolicy(
+        compiled.document,
+        compiled.policy_json,
+        compiled.mode,
+        compiled.manifest,
+        compiled.readable_selectors,
+        compiled.selected_objects,
+        compiled.output_package,
+        ("legacy warning",),
+    )
+
+    assert legacy.warnings == ("legacy warning",)
+    assert legacy.bedrock_model_arn is None

@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Broad project-bucket role that RAJA narrows per Scene with an inline STS
-  session policy. Apply this template as an administrator; raja_sts never
-  creates or mutates IAM resources.
+  Administrator-applied broad Scene execution role. raja_sts narrows this
+  role per Scene with an inline STS session policy.
 
 Parameters:
   OrchestratorPrincipalArn:
@@ -15,6 +14,10 @@ Parameters:
       ARN for project buckets, optionally with a controlled wildcard, for example
       arn:aws:s3:::my-project-* or arn:aws:s3:::my-project-bucket.
     AllowedPattern: '^arn:aws:s3:::[a-z0-9.*-]+$'
+  BedrockModelArn:
+    Type: String
+    Description: Exact Bedrock foundation model admitted by this execution role.
+    AllowedPattern: '^arn:aws:bedrock:[a-z]{2}-[a-z]+-[0-9]+::foundation-model/[A-Za-z0-9][A-Za-z0-9._:-]*$'
   RoleName:
     Type: String
     Default: scene-execution
@@ -57,8 +60,12 @@ Resources:
                   - s3:GetObjectVersion
                   - s3:PutObject
                 Resource: !Sub "${ProjectBucketArnPattern}/*"
+              - Sid: ExactBedrockModel
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Ref BedrockModelArn
 
 Outputs:
   SceneExecutionRoleArn:
-    Description: Pass this ARN to raja_sts.mint(role_arn=...).
+    Description: Pass this ARN to raja_sts.mint() or raja_sts.run_scene().
     Value: !GetAtt SceneExecutionRole.Arn

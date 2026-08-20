@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from os.path import commonprefix
@@ -16,9 +17,14 @@ DEFAULT_MAX_POLICY_CHARACTERS = 2048
 _ALLOWED_SCOPE_KEYS = {
     "readable",
     "writable_package",
+    "bedrock_model",
     "allow_prefix_fallback",
     "require_version_ids",
 }
+_BEDROCK_MODEL_RE = re.compile(
+    r"^arn:aws:bedrock:(?P<region>[a-z]{2}-[a-z]+-\d+):"
+    r":foundation-model/[A-Za-z0-9][A-Za-z0-9._:-]*$"
+)
 
 
 def _parse_readable(value: object) -> tuple[str, ...]:
@@ -41,6 +47,16 @@ def _parse_boolean(scope: Mapping[str, object], key: str) -> bool:
     value = scope.get(key, False)
     if not isinstance(value, bool):
         raise InvalidScopeError(f"{key} must be a boolean")
+    return value
+
+
+def _parse_bedrock_model(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _BEDROCK_MODEL_RE.fullmatch(value):
+        raise InvalidScopeError(
+            "bedrock_model must be one exact commercial-partition foundation-model ARN"
+        )
     return value
 
 
@@ -95,6 +111,20 @@ def _write_statement(output: OutputPackage) -> dict[str, Any]:
         "Action": "s3:PutObject",
         "Resource": list(output.write_resources),
     }
+
+
+def _output_versioning_statement(output: OutputPackage) -> dict[str, Any]:
+    return {
+        "Effect": "Allow",
+        "Action": "s3:GetBucketVersioning",
+        "Resource": output.bucket_arn,
+    }
+
+
+def _bedrock_statement(model_arn: str | None) -> list[dict[str, Any]]:
+    if model_arn is None:
+        return []
+    return [{"Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": model_arn}]
 
 
 def _current_read_statement(resources: Sequence[str]) -> dict[str, Any]:
@@ -222,6 +252,7 @@ def compile(
     manifest = parse_manifest_uri(manifest_uri)
     selectors = _parse_readable(scope_spec.get("readable"))
     output = parse_output_package(scope_spec.get("writable_package"))
+    bedrock_model_arn = _parse_bedrock_model(scope_spec.get("bedrock_model"))
     allow_prefix_fallback = _parse_boolean(scope_spec, "allow_prefix_fallback")
     require_version_ids = _parse_boolean(scope_spec, "require_version_ids")
 
@@ -238,7 +269,16 @@ def compile(
     current_read_resources = [item.arn for item in selected if item.version_id is None]
     current_read_resources.extend(metadata_read_resources)
     guardrails = _guardrail_statements(current_read_resources, output)
-    document, policy_json = _serialize([*guardrails, *read_statements, _write_statement(output)])
+    model_statement = _bedrock_statement(bedrock_model_arn)
+    document, policy_json = _serialize(
+        [
+            *guardrails,
+            *read_statements,
+            _output_versioning_statement(output),
+            *model_statement,
+            _write_statement(output),
+        ]
+    )
     warnings: tuple[str, ...] = ()
     if missing_versions:
         warnings = (
@@ -267,7 +307,13 @@ def compile(
         ]
         guardrails = _guardrail_statements([*prefix_resources, *metadata_read_resources], output)
         document, policy_json = _serialize(
-            [*guardrails, *read_statements, _write_statement(output)]
+            [
+                *guardrails,
+                *read_statements,
+                _output_versioning_statement(output),
+                *model_statement,
+                _write_statement(output),
+            ]
         )
         if len(policy_json) > max_policy_characters:
             raise PolicySizeError(
@@ -283,5 +329,6 @@ def compile(
         readable_selectors=selectors,
         selected_objects=selected,
         output_package=output,
+        bedrock_model_arn=bedrock_model_arn,
         warnings=warnings,
     )

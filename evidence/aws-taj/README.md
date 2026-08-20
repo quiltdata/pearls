@@ -51,6 +51,9 @@ followed by these scoped outcomes:
 - `ListBucket:anywhere`: `denied` with `AccessDenied`
 - `DeleteObject:anywhere`: `denied` with `AccessDenied`
 - `DeleteObjectVersion:anywhere`: `denied` with `AccessDenied`
+- `RunScene:exact-model-publication`: `allowed`, with a full output top hash
+- `Converse:alternate-model`: `denied` with `AccessDeniedException`
+- `RunnerCleanup:DeleteObjectVersion`: `allowed` for every runner output version
 - `Cleanup:DeleteObjectVersion`: `allowed` for every created proof version
 
 Do not hand-edit service outcomes or fabricate a transcript. Re-run the proof

@@ -1,6 +1,49 @@
+<!-- markdownlint-disable MD024 -->
+
 # Changelog
 
 All notable changes to this project are documented in this file.
+
+## [0.1.1] - 2026-08-19
+
+### Added
+
+- Added the public `run_scene()` bounded-execution primitive, which compiles a
+  pinned manifest once, mints one Scene-named STS session, materializes exact
+  selected object versions, invokes one caller handler, and publishes one
+  descendant Quilt Package.
+- Added exact `bedrock:InvokeModel` authority for one sealed foundation-model
+  ARN and a thin Hello Scene example that performs one Bedrock Converse call
+  through the scoped session.
+- Added standard `run/scene.json` and `run/invocation.json` records containing
+  non-secret authority, lineage, audit identity, invocation, and timestamp
+  metadata.
+- Added an explicit-session, Quilt-backed v1 publication adapter that uses
+  Quilt's canonical Package manifest and top-hash implementation, requires a
+  versioned output bucket and version IDs from every write, and performs no
+  bucket listing or deletion; `latest` remains the final arbitration write.
+
+### Security
+
+- The runner rejects prefix, mixed, unversioned, unhashed, and unsupported-hash
+  inputs. Every selected read sends its sealed S3 version ID and verifies the
+  manifest content hash before handler execution.
+- Input reads, handler SDK clients, and package publication share one explicit
+  `boto3.Session` built only from the minted temporary credential. Handler
+  outputs and JSON metadata are validated before any output write, and
+  credential-shaped metadata is rejected.
+- Bedrock authority admits only `bedrock:InvokeModel` on the exact model ARN;
+  alternate models and broad `bedrock:*` capabilities remain outside the
+  compiled policy.
+
+### Known limitations
+
+- V1 runs exactly one handler without retries, streaming, tools, task graphs,
+  cleanup, promotion, KMS integration, or generalized model-provider support.
+- Output lineage is declared in the execution record but is not a
+  cryptographic proof. Failed or losing concurrent publications can leave
+  unreferenced object versions, immutable manifests, or revision pointers for
+  administrator lifecycle cleanup because Scene credentials cannot delete.
 
 ## [0.1.0] - 2026-08-19
 
@@ -10,7 +53,7 @@ All notable changes to this project are documented in this file.
   revisions and sealed logical read/output scopes.
 - Added compact, set-based exact S3 object/version policy generation,
   deterministic minified JSON, compilation reports, and a fail-closed
-  2,048-character STS preflight. A five-object Scene remains exact at 1,674
+  2,048-character STS preflight. A five-object Scene remains exact at 1,767
   characters instead of requiring prefix fallback.
 - Added an explicit, reportable physical-prefix fallback for callers that
   knowingly accept widened read authority.
