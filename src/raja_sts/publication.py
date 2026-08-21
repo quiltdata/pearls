@@ -551,6 +551,15 @@ def _publication_would_write(
     return base is None and current is None
 
 
+def _latest_without_this_write(
+    observed: _Pointer | None, top_hash: str
+) -> tuple[bool, str | None, bool]:
+    """Classify a ``latest`` pointer this invocation did not write."""
+    if observed is not None and observed.top_hash == top_hash:
+        return True, observed.top_hash, False
+    return False, observed.top_hash if observed is not None else None, False
+
+
 def _advance_latest(
     *,
     s3_client: Any,
@@ -567,16 +576,26 @@ def _advance_latest(
     if base is None:
         request["IfNoneMatch"] = "*"
     else:
+        # S3 conditions a destination write on ETag but never on VersionId, so a
+        # same-body rewrite preserves the ETag across a new generation and
+        # If-Match alone cannot see that ABA transition. The base was observed
+        # before this revision's data, manifest, and pointer writes, so confirm
+        # the recorded generation immediately before the swap instead of letting
+        # ETag equality stand in for it across that whole window. A generation
+        # this revision did not observe is another writer's, so this revision
+        # loses arbitration rather than overwriting it.
+        observed = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
+        if not _snapshot_matches(observed, base):
+            return _latest_without_this_write(observed, top_hash)
         request["IfMatch"] = base.etag
     try:
         _put_versioned(s3_client, **request)
     except Exception as error:
         if not _is_conditional_conflict(error):
             raise
-        observed = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
-        if observed is not None and observed.top_hash == top_hash:
-            return True, observed.top_hash, False
-        return False, observed.top_hash if observed is not None else None, False
+        return _latest_without_this_write(
+            _read_pointer(s3_client, bucket=output.bucket, key=latest_key), top_hash
+        )
     return True, top_hash, True
 
 
@@ -604,10 +623,11 @@ def _result_for_existing_revision(
         is_latest = False
         latest_top_hash = current.top_hash if current is not None else None
     elif base is not None:
-        # S3 can condition a destination write on ETag but not VersionId. A
-        # same-body rewrite can therefore preserve the ETag while changing the
-        # generation, so replaying a present-base transition cannot be made
-        # version-exact without changing Quilt's raw top-hash pointer format.
+        # The snapshot still matches, but this base was observed by an earlier
+        # invocation whose transition was already arbitrated. S3 offers no
+        # VersionId precondition to fence a stale intent, so replaying it could
+        # roll a later same-body generation back to this revision. Only an
+        # originally absent base is recoverable, by create-only write.
         assert current is not None  # Exact match with a present base.
         is_latest = False
         latest_top_hash = current.top_hash
@@ -667,8 +687,8 @@ def publish_package(
     reusing it for different intent is a typed conflict. Each revision pointer
     records the exact ``latest`` ETag and VersionId observed before its writes.
     An originally absent base can be recovered with a create-only write; a
-    present base is never replayed because S3 cannot condition a destination
-    write on VersionId, and ETag alone is vulnerable to same-body ABA.
+    present base is never replayed across invocations, because that observation
+    is stale and its transition was already arbitrated once.
 
     Workflow validation and every caller-supplied invariant run before the first
     write. Invariants receive the final merged metadata and complete object set.
@@ -677,6 +697,19 @@ def publish_package(
     pointer. ``latest`` is last and uses ``If-None-Match`` for genesis or
     ``If-Match`` for a subsequent revision. Losing that CAS is a successful
     ``published-not-latest`` outcome because the immutable revision is durable.
+
+    S3 cannot condition a destination write on the destination's VersionId, so
+    ETag equality alone cannot distinguish the observed ``latest`` generation
+    from a same-body rewrite of it. A present-base advance therefore reconfirms
+    the recorded ETag *and* VersionId immediately before its ``If-Match`` write,
+    catching generation changes during the preceding data, manifest, and
+    revision-pointer writes. The final read-to-write interval cannot be fenced:
+    a same-body rewrite there retains the ETag and may be superseded by this
+    later write. Present-base advancement is therefore an ETag/value CAS, not a
+    VersionId/generation CAS. Because Quilt's pointer contains only the raw top
+    hash, ``is_latest`` likewise reports current content, not ownership of one
+    pointer generation; stronger generation fencing requires an external
+    coordinator or a future pointer protocol.
     """
     try:
         intent = _prepare_publication_intent(

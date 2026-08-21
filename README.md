@@ -975,13 +975,21 @@ run.
   no verb can delete a stack, a role, or an object.
 - The publisher requires output bucket versioning before its first write and
   requires every S3 write to return a non-null version ID. Each invocation gets
-  a create-only revision pointer; `latest` is a final ETag compare-and-swap.
+  a create-only revision pointer; `latest` is a final, generation-checked ETag
+  compare-and-swap. A present-base advance rereads the exact ETag and VersionId
+  immediately before that write, which catches a same-body generation change
+  during package writes, but S3 cannot fence another same-body rewrite in the
+  final read-to-write interval because destination `PutObject` has no VersionId
+  condition. Quilt's raw top-hash pointer cannot carry a unique generation token,
+  so `is_latest` reports current package content rather than ownership of one
+  pointer version; exact generation fencing would require another coordination
+  protocol.
   Concurrent writers can create unreferenced object versions, but both the CAS
-  winner and loser retain manifests that pin their exact data versions. The
-  loser returns `published-not-latest` rather than disguising a durable revision
-  as total failure. Bucket Object Lock or bucket-policy controls remain
-  necessary to prevent unrelated principals from replacing or deleting
-  versions.
+  winner and loser retain manifests and create-only revision pointers that pin
+  their exact data versions. The loser returns `published-not-latest` rather
+  than disguising a durable revision as total failure. Bucket Object Lock or
+  bucket-policy controls remain necessary to prevent unrelated principals from
+  replacing or deleting versions.
 - The broad `.quilt/packages/*` output namespace is required because a new
   manifest's content hash is unknown before the worker builds it. Quilt3's
   content-addressed API contract derives that key from the manifest bytes;

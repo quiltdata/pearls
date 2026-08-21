@@ -19,7 +19,12 @@ All notable changes to this project are documented in this file.
   and records a durable `published-not-latest` result for a losing writer.
   Version-ID-safe retries reconcile the exact published revision, and
   `PublicationWriteDisposition` distinguishes no write, `latest`-only recovery,
-  and package writes.
+  and package writes. `latest` advances only from the exact pointer generation
+  the writer recorded: because S3 conditions a write on ETag but not on
+  `VersionId`, a present base is reconfirmed by ETag *and* `VersionId`
+  immediately before the conditional swap, so another writer's same-body rewrite
+  during the intervening data, manifest, and pointer writes is arbitration loss
+  rather than a silent overwrite.
 - **Run-derived output metadata (#13):** a handler can return
   `SceneHandlerResult.output_meta`; publication merges it with caller metadata
   only after refusing key collisions, non-finite/non-JSON values, and credential
@@ -61,9 +66,16 @@ All notable changes to this project are documented in this file.
   session policy.
 - A failed publication or writer that loses `latest` arbitration can leave
   unreferenced versioned objects. A retry whose recorded base `latest` version
-  was present does not replay that transition, because S3 cannot condition a
-  destination write on the destination's `VersionId`; it remains durably
-  `published-not-latest`.
+  was present does not replay that transition, because that observation is stale
+  and S3 offers no `VersionId` precondition to fence it; the revision remains
+  durably `published-not-latest`. Reconfirming the base generation before a
+  first-attempt swap narrows the ETag-only window to two adjacent calls but
+  cannot close it, so a same-body rewrite landing inside that window is still
+  indistinguishable from the recorded generation. A fresh present-base advance rereads the exact version
+  immediately before its ETag/value CAS, but it cannot fence a same-body rewrite
+  in the final read-to-write interval. Quilt's raw top-hash pointer carries no
+  generation token, so exact generation fencing requires another coordination
+  protocol; every create-only revision remains durable regardless.
 - Domain invariants are caller code over one detached pending revision. The CLI
   does not dynamically load invariant implementations.
 - Genesis authoring proves the frozen bytes, layout, and static declaration

@@ -249,6 +249,9 @@ def test_existing_latest_is_advanced_with_compare_and_swap() -> None:
     assert s3.requests[-1]["IfMatch"] == '"parent-etag"'
     assert "IfNoneMatch" not in s3.requests[-1]
     assert s3.current[latest_key].body == publication.top_hash.encode()
+    # The base observation precedes the package writes, so the generation it
+    # recorded is reconfirmed immediately before the ETag-conditioned swap.
+    assert [str(request["Key"]) for request in s3.get_requests].count(latest_key) == 2
 
 
 def test_concurrent_latest_conflict_is_published_not_latest() -> None:
@@ -1033,6 +1036,49 @@ def test_nonconditional_latest_failure_is_not_misreported_as_a_cas_loss() -> Non
     assert isinstance(raised.value.__cause__, RuntimeError)
 
 
+class _AbaBeforeFreshLatestRecheckS3(RecordingS3):
+    """Rewrite the base generation immediately before the fresh-path recheck."""
+
+    latest_reads = 0
+    aba_triggered = False
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        if key.endswith("/latest"):
+            self.latest_reads += 1
+            if self.latest_reads == 2:
+                current = self.current[key]
+                self.current[key] = _StoredObject(
+                    current.body,
+                    "same-body-newer-version",
+                    current.etag,
+                    current.metadata,
+                )
+                self.aba_triggered = True
+        return super().get_object(**kwargs)
+
+
+def test_fresh_publication_recheck_preserves_a_same_body_newer_generation() -> None:
+    s3 = _AbaBeforeFreshLatestRecheckS3()
+    latest_key = ".quilt/named_packages/project/output/latest"
+    s3.seed(
+        latest_key,
+        b"a" * 64,
+        version_id="base-version",
+        etag='"same-body-etag"',
+    )
+
+    publication = _publish(s3)
+
+    assert s3.aba_triggered
+    assert publication.status == "published-not-latest"
+    assert not publication.is_latest
+    assert publication.latest_top_hash == "a" * 64
+    assert publication.write_disposition == "package-writes"
+    assert s3.current[latest_key].version_id == "same-body-newer-version"
+    assert not any(request["Key"] == latest_key for request in s3.requests)
+
+
 class _AbaOnRecoveryWriteS3(RecordingS3):
     """Install a same-ETag newer version immediately before an unsafe replay."""
 
@@ -1105,6 +1151,63 @@ def test_interrupted_retry_rejects_same_body_etag_with_newer_version_id() -> Non
     assert retry.status == "published-not-latest"
     assert retry.latest_top_hash == "a" * 64
     assert s3.current[latest_key].version_id == "restored-newer-version"
+
+
+class _SameBodyLatestRewriteS3(RecordingS3):
+    """Install a same-body newer ``latest`` generation inside the write window."""
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        response = super().put_object(**kwargs)
+        if str(kwargs["Key"]).endswith("/scene-123"):
+            latest_key = ".quilt/named_packages/project/output/latest"
+            current = self.current[latest_key]
+            self.current[latest_key] = _StoredObject(
+                current.body,
+                "same-body-newer-version",
+                current.etag,
+                current.metadata,
+            )
+        return response
+
+
+def test_first_publication_refuses_a_same_body_latest_generation_change() -> None:
+    s3 = _SameBodyLatestRewriteS3()
+    latest_key = ".quilt/named_packages/project/output/latest"
+    revision_key = ".quilt/named_packages/project/output/scene-123"
+    s3.seed(latest_key, b"a" * 64, version_id="base-version", etag='"same-body-etag"')
+
+    publication = _publish(s3)
+
+    assert not any(str(request["Key"]).endswith("/latest") for request in s3.requests)
+    assert s3.current[latest_key].version_id == "same-body-newer-version"
+    assert s3.current[latest_key].body == b"a" * 64
+    assert publication.status == "published-not-latest"
+    assert not publication.is_latest
+    assert publication.previous_top_hash == "a" * 64
+    assert publication.latest_top_hash == "a" * 64
+    assert publication.write_disposition == "package-writes"
+    assert s3.current[revision_key].body == publication.top_hash.encode()
+    assert s3.current[revision_key].metadata["raja-previous-version-id"] == "base-version"
+
+
+def test_first_publication_refuses_a_latest_pointer_deleted_after_its_base_read() -> None:
+    class _DeleteLatestS3(RecordingS3):
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().put_object(**kwargs)
+            if str(kwargs["Key"]).endswith("/scene-123"):
+                self.current.pop(".quilt/named_packages/project/output/latest", None)
+            return response
+
+    s3 = _DeleteLatestS3()
+    latest_key = ".quilt/named_packages/project/output/latest"
+    s3.seed(latest_key, b"a" * 64, version_id="base-version", etag='"base-etag"')
+
+    publication = _publish(s3)
+
+    assert not any(str(request["Key"]).endswith("/latest") for request in s3.requests)
+    assert publication.status == "published-not-latest"
+    assert publication.previous_top_hash == "a" * 64
+    assert publication.latest_top_hash is None
 
 
 class _SameIntentRevisionWinsS3(RecordingS3):
