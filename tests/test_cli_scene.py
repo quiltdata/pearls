@@ -337,7 +337,7 @@ def test_run_executes_one_scene_and_prints_the_immutable_package_uri() -> None:
     assert len(harness.runner.calls) == 1
     stdout = harness.streams.stdout
     assert stdout.startswith(
-        "quilt+s3://output-bucket#package=proj/trial001-worker-output&top_hash="
+        "quilt+s3://output-bucket#package=proj%2Ftrial001-worker-output&top_hash="
     )
     assert "assumed role" in stdout
 

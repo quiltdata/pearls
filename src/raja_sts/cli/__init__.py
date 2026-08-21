@@ -1,9 +1,9 @@
-"""The installed ``pearls`` command line.
+"""The three explicit ``pearls`` authority planes.
 
-``pearls scene`` runs one bounded Scene with short-lived Scene authority.
-``pearls infra`` deploys and inspects the persistent Scene execution roles with
-administrator authority. The split is deliberate: it keeps the privilege boundary
-legible instead of blurring it behind one convenience command.
+``pearls genesis`` authors packages with the selected operator identity,
+``pearls scene`` runs bounded work with short-lived Scene authority, and
+``pearls infra`` administers persistent execution roles. Keeping these groups
+separate makes each trust and mutation boundary visible.
 """
 
 from __future__ import annotations

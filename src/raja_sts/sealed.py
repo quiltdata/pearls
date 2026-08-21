@@ -19,21 +19,28 @@ import hashlib
 import sys
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import boto3
 
 from .errors import HandlerContractError, ManifestLoadError
-from .manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
+from .genesis import SEALED_HANDLER_KEY as SEALED_HANDLER_KEY
+from .manifest import (
+    ManifestLoader,
+    load_quilt_manifest,
+    parse_manifest_uri,
+    read_manifest_object,
+)
 from .models import ManifestObject, PinnedManifestURI
-from .runner import SceneHandler, read_manifest_object
 
-SEALED_HANDLER_KEY = "protocol/handler.py"
+if TYPE_CHECKING:
+    from .runner import SceneHandler
+
 HANDLER_ATTRIBUTE = "handler"
 _MODULE_PREFIX = "raja_sts._sealed_handler_"
 
 
-def _declares_handler(source: bytes, handler_key: str) -> None:
+def validate_sealed_handler_source(source: bytes, handler_key: str) -> None:
     """Check statically that the sealed bytes bind a module-level ``handler``.
 
     Parsing is not execution: this proves the bytes are valid Python that binds
@@ -223,7 +230,7 @@ def verify_sealed_handler(
     # Hash verification happens inside read_manifest_object, strictly before the
     # bytes are parsed and long before they could be executed.
     source = read_manifest_object(client, descriptor)
-    _declares_handler(source, handler_key)
+    validate_sealed_handler_source(source, handler_key)
     return SealedSource(
         source=source,
         genesis=genesis,

@@ -1,9 +1,23 @@
 """AWS-native minimum-viable TAJ compiler and bounded Scene runner."""
 
+from .authoring import (
+    DEFAULT_GENESIS_WORKFLOW,
+    GenesisAuthoringPlan,
+    GenesisAuthoringResult,
+    GenesisEntrySummary,
+    SealInputURI,
+    SealProvenance,
+    freeze_genesis_directory,
+    generate_genesis_revision_id,
+    parse_seal_input_uri,
+    prepare_genesis_authoring,
+    publish_genesis_authoring,
+)
 from .bedrock import BedrockInvocation, BedrockProfileLoader, load_bedrock_profile_resources
 from .errors import (
     AuthorityModeError,
     DomainInvariantError,
+    GenesisAuthoringError,
     HandlerContractError,
     InputIntegrityError,
     InvalidAssumeRoleRequest,
@@ -18,13 +32,22 @@ from .errors import (
     RajaStsError,
     WorkflowContractError,
 )
-from .models import CompiledPolicy, ManifestObject, OutputSelector, ScopedCredentials
+from .manifest import format_manifest_uri, load_quilt_manifest_from_s3, parse_manifest_uri
+from .models import (
+    CompiledPolicy,
+    ManifestObject,
+    OutputPackage,
+    OutputSelector,
+    PinnedManifestURI,
+    ScopedCredentials,
+)
 from .policy import compile
 from .publication import (
     PublicationContext,
     PublicationInvariant,
     PublicationResult,
     PublicationStatus,
+    PublicationWriteDisposition,
     publish_package,
 )
 from .runner import (
@@ -43,18 +66,24 @@ from .sealed import (
     SealedHandler,
     SealedSource,
     load_sealed_handler,
+    validate_sealed_handler_source,
     verify_sealed_handler,
 )
 from .sts import mint, mint_compiled
 from .workflows import resolve_workflow_stamp
 
 __all__ = [
+    "DEFAULT_GENESIS_WORKFLOW",
     "SEALED_HANDLER_KEY",
     "AuthorityModeError",
     "BedrockInvocation",
     "BedrockProfileLoader",
     "CompiledPolicy",
     "DomainInvariantError",
+    "GenesisAuthoringError",
+    "GenesisAuthoringPlan",
+    "GenesisAuthoringResult",
+    "GenesisEntrySummary",
     "GenesisPreflight",
     "HandlerContractError",
     "InputIntegrityError",
@@ -66,7 +95,9 @@ __all__ = [
     "ManifestObject",
     "MaterializedInput",
     "MintError",
+    "OutputPackage",
     "OutputSelector",
+    "PinnedManifestURI",
     "PolicySizeError",
     "PublicationConflictError",
     "PublicationContext",
@@ -74,25 +105,37 @@ __all__ = [
     "PublicationInvariant",
     "PublicationResult",
     "PublicationStatus",
+    "PublicationWriteDisposition",
     "RajaStsError",
     "SceneContext",
     "SceneHandler",
     "SceneHandlerResult",
     "SceneRunResult",
     "ScopedCredentials",
+    "SealInputURI",
+    "SealProvenance",
     "SealedHandler",
     "SealedSource",
     "WorkflowContractError",
     "compile",
+    "format_manifest_uri",
+    "freeze_genesis_directory",
+    "generate_genesis_revision_id",
     "load_bedrock_profile_resources",
+    "load_quilt_manifest_from_s3",
     "load_sealed_handler",
     "mint",
     "mint_compiled",
+    "parse_manifest_uri",
+    "parse_seal_input_uri",
     "preflight_genesis",
+    "prepare_genesis_authoring",
+    "publish_genesis_authoring",
     "publish_package",
     "resolve_workflow_stamp",
     "run_scene",
     "run_scene_from_genesis",
+    "validate_sealed_handler_source",
     "verify_sealed_handler",
 ]
 

@@ -53,6 +53,10 @@ class HandlerContractError(RajaStsError, ValueError):
     """A Scene handler returned unsafe objects or non-serializable metadata."""
 
 
+class GenesisAuthoringError(RajaStsError, ValueError):
+    """A local genesis tree or authoring declaration is unsafe or ambiguous."""
+
+
 class PublicationError(RajaStsError):
     """The bounded output package could not be published."""
 

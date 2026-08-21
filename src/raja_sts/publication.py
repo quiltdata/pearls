@@ -6,7 +6,7 @@ import hashlib
 import io
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -39,6 +39,7 @@ _PREVIOUS_VERSION_ID_META = "raja-previous-version-id"
 _PUBLISHED_AT_META = "raja-published-at"
 
 PublicationStatus = Literal["published", "published-not-latest"]
+PublicationWriteDisposition = Literal["none", "latest-only", "package-writes"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +68,7 @@ class PublicationInvariant(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PublicationResult:
-    """The durable revision and its best-effort named-package disposition."""
+    """Durable revision status plus this invocation's successful write path."""
 
     top_hash: str
     revision_id: str
@@ -79,6 +80,7 @@ class PublicationResult:
     previous_top_hash: str | None
     latest_top_hash: str | None
     metadata_keys: tuple[str, ...]
+    write_disposition: PublicationWriteDisposition
 
     @property
     def revision_key(self) -> str:
@@ -99,6 +101,16 @@ class _LatestBase:
     top_hash: str
     etag: str
     version_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicationIntent:
+    revision_id: str
+    objects: dict[str, bytes]
+    meta: dict[str, Any]
+    meta_json: str
+    invariant_ids: tuple[str, ...]
+    digest: str
 
 
 def _error_code(error: Exception) -> str | None:
@@ -169,7 +181,7 @@ def _read_pointer(s3_client: Any, *, bucket: str, key: str) -> _Pointer | None:
     return _Pointer(top_hash, etag, version_id, MappingProxyType(metadata))
 
 
-def _validate_revision_id(revision_id: object) -> str:
+def validate_revision_id(revision_id: object) -> str:
     if (
         not isinstance(revision_id, str)
         or not _REVISION_ID_RE.fullmatch(revision_id)
@@ -179,23 +191,40 @@ def _validate_revision_id(revision_id: object) -> str:
     return revision_id
 
 
-def _ensure_json_object_keys(value: object) -> None:
+def _ensure_json_object_keys(value: object, *, label: str) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             if not isinstance(key, str):
-                raise PublicationError("Package metadata JSON object keys must be strings")
-            _ensure_json_object_keys(child)
+                raise PublicationError(f"{label} JSON object keys must be strings")
+            _ensure_json_object_keys(child, label=label)
     elif isinstance(value, (list, tuple)):
         for child in value:
-            _ensure_json_object_keys(child)
+            _ensure_json_object_keys(child, label=label)
 
 
 def _metadata_json(meta: Mapping[str, Any]) -> str:
-    _ensure_json_object_keys(meta)
+    _ensure_json_object_keys(meta, label="Package metadata")
     try:
         return json.dumps(meta, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as error:
         raise PublicationError(f"Package metadata must be JSON-serializable: {error}") from error
+
+
+def _normalize_declared_intent(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise PublicationError("declared_intent must be a mapping")
+    detached = dict(value)
+    _ensure_json_object_keys(detached, label="declared_intent")
+    try:
+        encoded = json.dumps(detached, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise PublicationError(f"declared_intent must be JSON-serializable: {error}") from error
+    decoded = json.loads(encoded)
+    if not isinstance(decoded, dict):  # The encoded top level is always a mapping.
+        raise TypeError("declared_intent JSON did not decode to an object")
+    return decoded
 
 
 def _workflow_identity(workflow: str | None | object) -> Mapping[str, str]:
@@ -240,8 +269,9 @@ def _intent_digest(
     message: str | None,
     workflow: str | None | object,
     invariant_ids: Sequence[str],
+    declared_intent: Mapping[str, Any] | None,
 ) -> str:
-    intent = {
+    intent: dict[str, Any] = {
         "bucket": output.bucket,
         "name": output.name,
         "revision_id": revision_id,
@@ -258,8 +288,66 @@ def _intent_digest(
         "workflow": _workflow_identity(workflow),
         "invariants": list(invariant_ids),
     }
+    if declared_intent is not None:
+        intent["declared_intent"] = declared_intent
     encoded = json.dumps(intent, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _prepare_publication_intent(
+    *,
+    output: OutputPackage,
+    objects: Mapping[str, bytes],
+    revision_id: str,
+    user_meta: Mapping[str, Any] | None,
+    message: str | None,
+    workflow: str | None | object,
+    invariants: Sequence[PublicationInvariant],
+    declared_intent: Mapping[str, Any] | None,
+) -> _PublicationIntent:
+    revision_id = validate_revision_id(revision_id)
+    if output.revision_id is not None and output.revision_id != revision_id:
+        raise PublicationError(
+            "revision_id does not match the exact revision read authority in output"
+        )
+    if not isinstance(objects, Mapping) or not objects:
+        raise PublicationError("objects must be a non-empty mapping")
+    normalized_objects: dict[str, bytes] = {}
+    for logical_key, body in objects.items():
+        if not isinstance(logical_key, str) or not logical_key:
+            raise PublicationError("object logical keys must be non-empty strings")
+        if not isinstance(body, bytes):
+            raise PublicationError(f"output object {logical_key!r} must be bytes")
+        normalized_objects[logical_key] = body
+
+    if user_meta is not None and not isinstance(user_meta, Mapping):
+        raise PublicationError("user_meta must be a mapping")
+    meta = dict(user_meta) if user_meta else {}
+    meta_json = _metadata_json(meta)
+    if message is not None and not isinstance(message, str):
+        raise PublicationError("message must be a string")
+    if isinstance(invariants, (str, bytes)) or not isinstance(invariants, Sequence):
+        raise PublicationError("invariants must be a sequence")
+    invariant_ids = _invariant_identifiers(invariants)
+    normalized_declared_intent = _normalize_declared_intent(declared_intent)
+    digest = _intent_digest(
+        output=output,
+        revision_id=revision_id,
+        objects=normalized_objects,
+        meta=meta,
+        message=message,
+        workflow=workflow,
+        invariant_ids=invariant_ids,
+        declared_intent=normalized_declared_intent,
+    )
+    return _PublicationIntent(
+        revision_id=revision_id,
+        objects=normalized_objects,
+        meta=meta,
+        meta_json=meta_json,
+        invariant_ids=invariant_ids,
+        digest=digest,
+    )
 
 
 def _freeze_json(value: Any) -> Any:
@@ -403,6 +491,63 @@ def _snapshot_matches(pointer: _Pointer | None, base: _LatestBase | None) -> boo
     )
 
 
+def _publication_would_write(
+    *,
+    s3_client: Any,
+    output: OutputPackage,
+    objects: Mapping[str, bytes],
+    revision_id: str,
+    user_meta: Mapping[str, Any] | None = None,
+    message: str | None = None,
+    workflow: str | None | object = ...,
+    invariants: Sequence[PublicationInvariant] = (),
+    declared_intent: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether the current revision snapshot could require a write.
+
+    This read-only probe validates publication intent and classifies an existing
+    same-intent revision exactly as :func:`publish_package` does. ``False`` means
+    the revision is already latest or has been superseded, so its durable status
+    can be reported without consulting the current workflow. ``True`` means a
+    new revision or interrupted latest-pointer recovery could write; callers must
+    still invoke :func:`publish_package`, which rechecks all state before acting.
+    """
+    intent = _prepare_publication_intent(
+        output=output,
+        objects=objects,
+        revision_id=revision_id,
+        user_meta=user_meta,
+        message=message,
+        workflow=workflow,
+        invariants=invariants,
+        declared_intent=declared_intent,
+    )
+    pointer_prefix = f".quilt/named_packages/{output.name}"
+    revision = _read_pointer(
+        s3_client,
+        bucket=output.bucket,
+        key=f"{pointer_prefix}/{intent.revision_id}",
+    )
+    if revision is None:
+        return True
+    if revision.metadata.get(_INTENT_DIGEST_META) != intent.digest:
+        raise PublicationConflictError(
+            f"Revision {intent.revision_id!r} already records different publication intent"
+        )
+    if not revision.metadata.get(_MANIFEST_VERSION_META):
+        raise PublicationConflictError("Existing revision has no manifest version identity")
+
+    base = _base_from_revision(revision)
+    current = _read_pointer(
+        s3_client,
+        bucket=output.bucket,
+        key=f"{pointer_prefix}/latest",
+    )
+    if current is not None and current.top_hash == revision.top_hash:
+        return False
+    return base is None and current is None
+
+
 def _advance_latest(
     *,
     s3_client: Any,
@@ -410,7 +555,7 @@ def _advance_latest(
     latest_key: str,
     top_hash: str,
     base: _LatestBase | None,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, bool]:
     request: dict[str, Any] = {
         "Bucket": output.bucket,
         "Key": latest_key,
@@ -427,9 +572,9 @@ def _advance_latest(
             raise
         observed = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
         if observed is not None and observed.top_hash == top_hash:
-            return True, observed.top_hash
-        return False, observed.top_hash if observed is not None else None
-    return True, top_hash
+            return True, observed.top_hash, False
+        return False, observed.top_hash if observed is not None else None, False
+    return True, top_hash, True
 
 
 def _result_for_existing_revision(
@@ -440,11 +585,14 @@ def _result_for_existing_revision(
     revision: _Pointer,
     latest_key: str,
     metadata_keys: tuple[str, ...],
+    before_latest_write: Callable[[], None],
+    initial_write_disposition: PublicationWriteDisposition,
 ) -> PublicationResult:
     manifest_version_id = revision.metadata.get(_MANIFEST_VERSION_META)
     if not manifest_version_id:
         raise PublicationConflictError("Existing revision has no manifest version identity")
     base = _base_from_revision(revision)
+    write_disposition = initial_write_disposition
     current = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
     if current is not None and current.top_hash == revision.top_hash:
         is_latest = True
@@ -452,14 +600,35 @@ def _result_for_existing_revision(
     elif not _snapshot_matches(current, base):
         is_latest = False
         latest_top_hash = current.top_hash if current is not None else None
+    elif base is not None:
+        # S3 can condition a destination write on ETag but not VersionId. A
+        # same-body rewrite can therefore preserve the ETag while changing the
+        # generation, so replaying a present-base transition cannot be made
+        # version-exact without changing Quilt's raw top-hash pointer format.
+        assert current is not None  # Exact match with a present base.
+        is_latest = False
+        latest_top_hash = current.top_hash
     else:
-        is_latest, latest_top_hash = _advance_latest(
-            s3_client=s3_client,
-            output=output,
-            latest_key=latest_key,
-            top_hash=revision.top_hash,
-            base=base,
-        )
+        before_latest_write()
+        # Contract validation may take time. Recheck absence before the atomic
+        # create-only write; any current pointer makes this revision a CAS loser.
+        current = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
+        if current is not None and current.top_hash == revision.top_hash:
+            is_latest = True
+            latest_top_hash = revision.top_hash
+        elif current is not None:
+            is_latest = False
+            latest_top_hash = current.top_hash
+        else:
+            is_latest, latest_top_hash, wrote_latest = _advance_latest(
+                s3_client=s3_client,
+                output=output,
+                latest_key=latest_key,
+                top_hash=revision.top_hash,
+                base=None,
+            )
+            if wrote_latest and write_disposition == "none":
+                write_disposition = "latest-only"
     return PublicationResult(
         top_hash=revision.top_hash,
         revision_id=revision_id,
@@ -471,6 +640,7 @@ def _result_for_existing_revision(
         previous_top_hash=base.top_hash if base is not None else None,
         latest_top_hash=latest_top_hash,
         metadata_keys=metadata_keys,
+        write_disposition=write_disposition,
     )
 
 
@@ -485,15 +655,17 @@ def publish_package(
     message: str | None = None,
     workflow: str | None | object = ...,
     invariants: Sequence[PublicationInvariant] = (),
+    declared_intent: Mapping[str, Any] | None = None,
 ) -> PublicationResult:
     """Publish one idempotent Quilt revision and conditionally advance ``latest``.
 
     ``revision_id`` is the invocation identity. Reusing it with the same object
     bytes and publication declarations returns the already-recorded revision;
     reusing it for different intent is a typed conflict. Each revision pointer
-    records the exact ``latest`` ETag observed before its writes, allowing a
-    retry after interruption to finish that original compare-and-swap without
-    rolling back a newer publication.
+    records the exact ``latest`` ETag and VersionId observed before its writes.
+    An originally absent base can be recovered with a create-only write; a
+    present base is never replayed because S3 cannot condition a destination
+    write on VersionId, and ETag alone is vulnerable to same-body ABA.
 
     Workflow validation and every caller-supplied invariant run before the first
     write. Invariants receive the final merged metadata and complete object set.
@@ -504,11 +676,22 @@ def publish_package(
     ``published-not-latest`` outcome because the immutable revision is durable.
     """
     try:
-        revision_id = _validate_revision_id(revision_id)
-        if output.revision_id is not None and output.revision_id != revision_id:
-            raise PublicationError(
-                "revision_id does not match the exact revision read authority in output"
-            )
+        intent = _prepare_publication_intent(
+            output=output,
+            objects=objects,
+            revision_id=revision_id,
+            user_meta=user_meta,
+            message=message,
+            workflow=workflow,
+            invariants=invariants,
+            declared_intent=declared_intent,
+        )
+        revision_id = intent.revision_id
+        normalized_objects = intent.objects
+        meta = intent.meta
+        meta_json = intent.meta_json
+        invariant_ids = intent.invariant_ids
+        digest = intent.digest
         if timestamp.tzinfo is None:
             raise PublicationError("publication timestamp must be timezone-aware")
         published_at = timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -517,45 +700,48 @@ def publish_package(
         if versioning.get("Status") != "Enabled":
             raise PublicationError(f"Output bucket {output.bucket!r} must have versioning enabled")
 
-        if not isinstance(objects, Mapping) or not objects:
-            raise PublicationError("objects must be a non-empty mapping")
-        normalized_objects: dict[str, bytes] = {}
-        for logical_key, body in objects.items():
-            if not isinstance(logical_key, str) or not logical_key:
-                raise PublicationError("object logical keys must be non-empty strings")
-            if not isinstance(body, bytes):
-                raise PublicationError(f"output object {logical_key!r} must be bytes")
-            normalized_objects[logical_key] = body
-
-        if user_meta is not None and not isinstance(user_meta, Mapping):
-            raise PublicationError("user_meta must be a mapping")
-        meta = dict(user_meta) if user_meta else {}
-        meta_json = _metadata_json(meta)
-        if message is not None and not isinstance(message, str):
-            raise PublicationError("message must be a string")
-        if isinstance(invariants, (str, bytes)) or not isinstance(invariants, Sequence):
-            raise PublicationError("invariants must be a sequence")
-        invariant_ids = _invariant_identifiers(invariants)
-        digest = _intent_digest(
-            output=output,
-            revision_id=revision_id,
-            objects=normalized_objects,
-            meta=meta,
-            message=message,
-            workflow=workflow,
-            invariant_ids=invariant_ids,
-        )
-
         pointer_prefix = f".quilt/named_packages/{output.name}"
         revision_key = f"{pointer_prefix}/{revision_id}"
         latest_key = f"{pointer_prefix}/latest"
         existing_revision = _read_pointer(s3_client, bucket=output.bucket, key=revision_key)
         metadata_keys = tuple(sorted(meta))
+        if (
+            existing_revision is not None
+            and existing_revision.metadata.get(_INTENT_DIGEST_META) != digest
+        ):
+            raise PublicationConflictError(
+                f"Revision {revision_id!r} already records different publication intent"
+            )
+
+        entries = [
+            {"logical_key": key, "size": len(normalized_objects[key]), "meta": {}}
+            for key in sorted(normalized_objects)
+        ]
+
+        def validate_before_write() -> dict[str, Any] | None:
+            stamp = resolve_workflow_stamp(
+                s3_client=s3_client,
+                bucket=output.bucket,
+                package_name=output.name,
+                workflow=workflow,
+                user_meta=meta,
+                entries=entries,
+                message=message,
+            )
+            _check_invariants(
+                invariants,
+                invariant_ids,
+                output=output,
+                objects=normalized_objects,
+                meta_json=meta_json,
+                message=message,
+            )
+            return stamp
+
+        def revalidate_before_latest_write() -> None:
+            validate_before_write()
+
         if existing_revision is not None:
-            if existing_revision.metadata.get(_INTENT_DIGEST_META) != digest:
-                raise PublicationConflictError(
-                    f"Revision {revision_id!r} already records different publication intent"
-                )
             return _result_for_existing_revision(
                 s3_client=s3_client,
                 output=output,
@@ -563,30 +749,11 @@ def publish_package(
                 revision=existing_revision,
                 latest_key=latest_key,
                 metadata_keys=metadata_keys,
+                before_latest_write=revalidate_before_latest_write,
+                initial_write_disposition="none",
             )
 
-        entries = [
-            {"logical_key": key, "size": len(normalized_objects[key]), "meta": {}}
-            for key in sorted(normalized_objects)
-        ]
-        stamp = resolve_workflow_stamp(
-            s3_client=s3_client,
-            bucket=output.bucket,
-            package_name=output.name,
-            workflow=workflow,
-            user_meta=meta,
-            entries=entries,
-            message=message,
-        )
-        _check_invariants(
-            invariants,
-            invariant_ids,
-            output=output,
-            objects=normalized_objects,
-            meta_json=meta_json,
-            message=message,
-        )
-
+        stamp = validate_before_write()
         previous = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
         base = (
             _LatestBase(previous.top_hash, previous.etag, previous.version_id)
@@ -635,9 +802,11 @@ def publish_package(
                 revision=winner,
                 latest_key=latest_key,
                 metadata_keys=metadata_keys,
+                before_latest_write=revalidate_before_latest_write,
+                initial_write_disposition="package-writes",
             )
 
-        is_latest, latest_top_hash = _advance_latest(
+        is_latest, latest_top_hash, _ = _advance_latest(
             s3_client=s3_client,
             output=output,
             latest_key=latest_key,
@@ -655,6 +824,7 @@ def publish_package(
             previous_top_hash=previous.top_hash if previous is not None else None,
             latest_top_hash=latest_top_hash,
             metadata_keys=metadata_keys,
+            write_disposition="package-writes",
         )
     except (DomainInvariantError, PublicationError, WorkflowContractError):
         raise

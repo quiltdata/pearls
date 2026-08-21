@@ -181,6 +181,7 @@ def test_publish_package_uses_quilt_canonical_manifest_without_ambient_io(
     assert publication.status == "published"
     assert publication.is_latest
     assert not publication.reused_revision
+    assert publication.write_disposition == "package-writes"
 
     manifest = s3.requests[2]["Body"]
     records = [json.loads(line) for line in manifest.decode().splitlines()]
@@ -303,6 +304,7 @@ def test_same_revision_and_intent_is_an_idempotent_retry() -> None:
     assert retry.revision_version_id == first.revision_version_id
     assert retry.reused_revision
     assert retry.status == "published"
+    assert retry.write_disposition == "none"
 
 
 def test_retry_after_interruption_finishes_only_original_latest_cas() -> None:
@@ -319,6 +321,41 @@ def test_retry_after_interruption_finishes_only_original_latest_cas() -> None:
     assert recovered.reused_revision
     assert recovered.status == "published"
     assert recovered.is_latest
+    assert recovered.write_disposition == "latest-only"
+
+
+class _PeerWinsRecoveryLatestS3(RecordingS3):
+    peer_wins_latest = False
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        if self.peer_wins_latest and key.endswith("/latest"):
+            self.requests.append(kwargs)
+            body = kwargs["Body"]
+            assert isinstance(body, bytes)
+            self.current[key] = _StoredObject(
+                body,
+                "peer-latest-version",
+                f'"{hashlib.md5(body, usedforsecurity=False).hexdigest()}"',  # noqa: S324
+                {},
+            )
+            raise self._precondition_failed()
+        return super().put_object(**kwargs)
+
+
+def test_recovery_lost_to_same_revision_reports_no_invocation_write() -> None:
+    s3 = _PeerWinsRecoveryLatestS3(fail_suffix="/latest")
+    interrupted = _publish(s3)
+    assert interrupted.status == "published-not-latest"
+
+    s3.fail_suffix = None
+    s3.peer_wins_latest = True
+    retry = _publish(s3)
+
+    assert retry.status == "published"
+    assert retry.reused_revision
+    assert retry.write_disposition == "none"
+    assert retry.latest_top_hash == interrupted.top_hash
 
 
 def test_retry_does_not_roll_an_advanced_latest_pointer_back() -> None:
@@ -335,7 +372,46 @@ def test_retry_does_not_roll_an_advanced_latest_pointer_back() -> None:
     assert retry.top_hash == interrupted.top_hash
     assert retry.status == "published-not-latest"
     assert retry.latest_top_hash == "f" * 64
+    assert retry.write_disposition == "none"
     assert s3.current[latest_key].body == b"f" * 64
+
+
+def test_declared_intent_is_canonical_and_bound_to_revision_identity() -> None:
+    s3 = RecordingS3()
+    first = _publish(
+        s3,
+        declared_intent={
+            "$schema": "https://example.test/publication-intent/v1",
+            "handler_key": "protocol/handler.py",
+            "evidence": {"source": "one", "version": 1},
+        },
+    )
+    write_count = len(s3.requests)
+
+    retry = _publish(
+        s3,
+        declared_intent={
+            "evidence": {"version": 1, "source": "one"},
+            "handler_key": "protocol/handler.py",
+            "$schema": "https://example.test/publication-intent/v1",
+        },
+    )
+
+    assert retry.top_hash == first.top_hash
+    assert retry.reused_revision
+    assert len(s3.requests) == write_count
+
+    with pytest.raises(PublicationConflictError, match="different publication intent"):
+        _publish(
+            s3,
+            declared_intent={
+                "$schema": "https://example.test/publication-intent/v1",
+                "handler_key": "protocol/supervisor.py",
+                "evidence": {"source": "one", "version": 1},
+            },
+        )
+
+    assert len(s3.requests) == write_count
 
 
 def test_same_revision_with_different_intent_refuses_before_writes() -> None:
@@ -440,6 +516,116 @@ class GovernedS3(RecordingS3):
             return super().get_object(**kwargs)
         content, version = entry
         return {"Body": io.BytesIO(content), "VersionId": version}
+
+
+def _publish_governed(s3: GovernedS3) -> Any:
+    return publish_package(
+        s3_client=s3,
+        output=OutputPackage("trials/trial001", "output-bucket"),
+        objects={"content/observations.csv": b"a,b\n"},
+        timestamp=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        revision_id="scene-123",
+        user_meta={"trial": 1},
+        message="scene-native run",
+        workflow="trial-run",
+    )
+
+
+def test_completed_retry_ignores_changed_workflow_when_no_write_is_needed() -> None:
+    s3 = GovernedS3()
+    first = _publish_governed(s3)
+    write_count = len(s3.requests)
+    s3.workflow_objects = {
+        ".quilt/workflows/config.yml": (GOVERNED_CONFIG, "config-v2"),
+        ".quilt/workflows/trial-run-v1.json": (
+            b'{"type":"object","required":["replacement"]}',
+            "schema-v2",
+        ),
+    }
+
+    retry = _publish_governed(s3)
+
+    assert len(s3.requests) == write_count
+    assert retry.status == "published"
+    assert retry.reused_revision
+    assert retry.top_hash == first.top_hash
+    assert retry.revision_version_id == first.revision_version_id
+
+
+def test_status_only_retry_ignores_deleted_workflow_and_preserves_newer_latest() -> None:
+    s3 = GovernedS3(fail_suffix="/latest")
+    interrupted = _publish_governed(s3)
+    latest_key = ".quilt/named_packages/trials/trial001/latest"
+    s3.fail_suffix = None
+    s3.seed(latest_key, b"f" * 64, version_id="newer-version", etag='"newer-etag"')
+    s3.workflow_objects = {}
+    write_count = len(s3.requests)
+
+    retry = _publish_governed(s3)
+
+    assert len(s3.requests) == write_count
+    assert retry.status == "published-not-latest"
+    assert retry.reused_revision
+    assert retry.top_hash == interrupted.top_hash
+    assert retry.latest_top_hash == "f" * 64
+    assert s3.current[latest_key].body == b"f" * 64
+    assert s3.current[latest_key].version_id == "newer-version"
+
+
+class _SameIntentWinnerChangesWorkflowS3(GovernedS3):
+    """Inject a same-intent revision winner and then reject its current contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.workflow_objects = dict(GovernedS3.workflow_objects)
+        self.workflow_reads = 0
+        self.injected_winner = False
+
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        if str(kwargs["Key"]).startswith(".quilt/workflows/"):
+            self.workflow_reads += 1
+        return super().get_object(**kwargs)
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        if (
+            not self.injected_winner
+            and key.endswith("/scene-123")
+            and kwargs.get("IfNoneMatch") == "*"
+        ):
+            self.requests.append(kwargs)
+            body = kwargs["Body"]
+            metadata = kwargs["Metadata"]
+            assert isinstance(body, bytes)
+            assert isinstance(metadata, Mapping)
+            self.current[key] = _StoredObject(
+                body,
+                "concurrent-revision-version",
+                f'"{hashlib.md5(body, usedforsecurity=False).hexdigest()}"',  # noqa: S324
+                dict(metadata),
+            )
+            self.workflow_objects = {
+                ".quilt/workflows/config.yml": (GOVERNED_CONFIG, "config-v2"),
+                ".quilt/workflows/trial-run-v1.json": (
+                    b'{"type":"object","required":["replacement"]}',
+                    "schema-v2",
+                ),
+            }
+            self.injected_winner = True
+            raise self._precondition_failed()
+        return super().put_object(**kwargs)
+
+
+def test_same_intent_revision_winner_revalidates_before_advancing_latest() -> None:
+    s3 = _SameIntentWinnerChangesWorkflowS3()
+
+    with pytest.raises(WorkflowContractError, match="replacement"):
+        _publish_governed(s3)
+
+    assert s3.injected_winner
+    assert s3.workflow_reads == 4
+    assert not any(str(request["Key"]).endswith("/latest") for request in s3.requests)
+    assert ".quilt/named_packages/trials/trial001/scene-123" in s3.current
 
 
 def test_publish_into_governed_bucket_validates_and_stamps() -> None:
@@ -847,6 +1033,52 @@ def test_nonconditional_latest_failure_is_not_misreported_as_a_cas_loss() -> Non
     assert isinstance(raised.value.__cause__, RuntimeError)
 
 
+class _AbaOnRecoveryWriteS3(RecordingS3):
+    """Install a same-ETag newer version immediately before an unsafe replay."""
+
+    aba_armed = False
+    aba_triggered = False
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        if self.aba_armed and key.endswith("/latest") and "IfMatch" in kwargs:
+            current = self.current[key]
+            self.current[key] = _StoredObject(
+                current.body,
+                "same-body-newer-version",
+                current.etag,
+                current.metadata,
+            )
+            self.aba_triggered = True
+        return super().put_object(**kwargs)
+
+
+def test_present_base_interrupted_retry_fails_closed_before_etag_aba_window() -> None:
+    s3 = _AbaOnRecoveryWriteS3(fail_suffix="/latest")
+    latest_key = ".quilt/named_packages/project/output/latest"
+    s3.seed(
+        latest_key,
+        b"a" * 64,
+        version_id="base-version",
+        etag='"same-body-etag"',
+    )
+    interrupted = _publish(s3)
+    assert interrupted.status == "published-not-latest"
+
+    s3.fail_suffix = None
+    s3.aba_armed = True
+    write_count = len(s3.requests)
+    retry = _publish(s3)
+
+    assert len(s3.requests) == write_count
+    assert retry.status == "published-not-latest"
+    assert retry.reused_revision
+    assert retry.write_disposition == "none"
+    assert retry.latest_top_hash == "a" * 64
+    assert not s3.aba_triggered
+    assert s3.current[latest_key].version_id == "base-version"
+
+
 def test_interrupted_retry_rejects_same_body_etag_with_newer_version_id() -> None:
     s3 = RecordingS3(fail_suffix="/latest")
     latest_key = ".quilt/named_packages/project/output/latest"
@@ -875,6 +1107,45 @@ def test_interrupted_retry_rejects_same_body_etag_with_newer_version_id() -> Non
     assert s3.current[latest_key].version_id == "restored-newer-version"
 
 
+class _SameIntentRevisionWinsS3(RecordingS3):
+    def __init__(self) -> None:
+        super().__init__()
+        self.injected_winner = False
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = str(kwargs["Key"])
+        if (
+            not self.injected_winner
+            and key.endswith("/scene-123")
+            and kwargs.get("IfNoneMatch") == "*"
+        ):
+            self.requests.append(kwargs)
+            body = kwargs["Body"]
+            metadata = kwargs["Metadata"]
+            assert isinstance(body, bytes)
+            assert isinstance(metadata, Mapping)
+            self.current[key] = _StoredObject(
+                body,
+                "concurrent-revision-version",
+                f'"{hashlib.md5(body, usedforsecurity=False).hexdigest()}"',  # noqa: S324
+                dict(metadata),
+            )
+            self.injected_winner = True
+            raise self._precondition_failed()
+        return super().put_object(**kwargs)
+
+
+def test_same_intent_revision_winner_preserves_prior_package_writes() -> None:
+    s3 = _SameIntentRevisionWinsS3()
+
+    publication = _publish(s3)
+
+    assert s3.injected_winner
+    assert publication.status == "published"
+    assert publication.reused_revision
+    assert publication.write_disposition == "package-writes"
+
+
 class _SameRevisionWinsLatestS3(RecordingS3):
     def put_object(self, **kwargs: Any) -> dict[str, Any]:
         key = str(kwargs["Key"])
@@ -900,6 +1171,7 @@ def test_latest_conflict_reconciles_same_revision_as_published() -> None:
     assert publication.status == "published"
     assert publication.is_latest
     assert publication.latest_top_hash == publication.top_hash
+    assert publication.write_disposition == "package-writes"
 
 
 def test_invariant_metadata_is_recursively_read_only_between_checkers() -> None:

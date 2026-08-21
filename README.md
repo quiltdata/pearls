@@ -319,17 +319,28 @@ lineage state require separately authorized resolution outside this interface.
 `scene_id` is also the collision-safe publication revision identity. A retry of
 `publish_package` with the same identity and byte-for-byte intent reuses the
 recorded revision without multiplying writes; different intent under that
-identity raises `PublicationConflictError`. A deliberate re-execution uses a new
-Scene ID and appends another revision, even in the same second. Publication
-writes data, the immutable manifest, and a create-only revision pointer before
-conditionally advancing `latest`: first publication uses `If-None-Match`, later
-ones use `If-Match` on the observed ETag. A CAS loser still returns a durable
+identity raises `PublicationConflictError`. A matching revision that is already
+`latest`, or that has been superseded by a newer `latest`, returns its durable
+status without consulting a changed or deleted current workflow because no write
+is possible. An interrupted retry whose original base was absent and remains
+absent revalidates the workflow and domain invariants before a create-only
+`latest` write. A retry whose recorded base was a present S3 VersionId does not
+replay that transition: S3 destination writes cannot be conditioned on VersionId,
+so it fails closed as the successful durable status `published-not-latest` rather
+than risking an ETag ABA rollback. A deliberate re-execution uses a new Scene ID
+and appends another revision, even in the same second. Publication writes data,
+the immutable manifest, and a create-only revision pointer before conditionally
+advancing `latest`: first publication uses `If-None-Match`, later ones use
+`If-Match` on the observed ETag. A CAS loser still returns a durable
 `PublicationResult` with `status="published-not-latest"`; it is not reported as
-a total failure. The revision records its original CAS base ETag and S3 VersionId so
-an interrupted retry can finish that transition but cannot mistake a restored,
-newer `latest` version for the old base. After a conditional conflict the
-publisher rereads `latest`, so another retry that advanced the same top hash is
-reported accurately. `SceneRunResult.top_hash` remains a compatibility property
+a total failure. The revision records its original CAS base ETag and S3 VersionId
+so a retry can reject a restored, newer `latest` version even when its body and
+ETag match the old base. After a conditional conflict the publisher rereads
+`latest`, so another retry that advanced the same top hash is reported
+accurately. `PublicationResult.write_disposition` separately records whether
+this invocation performed no successful write, only recovered `latest`, or
+entered the package-write path; durable status and invocation-local mutation are
+intentionally distinct. `SceneRunResult.top_hash` remains a compatibility property
 over `SceneRunResult.publication.top_hash`.
 
 ### Boot from one genesis package
@@ -392,25 +403,120 @@ revision, metadata, and invariant semantics.
 
 ### Command line
 
-Installing the package creates one `pearls` command with two groups:
+Installing the package creates one `pearls` command with three authority groups:
 
 ```text
 pearls
-  scene   check | run                                        bounded Scene authority
-  infra   validate | plan | deploy | status | assume-policy   administrator IAM
+  genesis author DIRECTORY                                  operator package authority
+  scene   check | run                                       bounded Scene authority
+  infra   validate | plan | deploy | status | assume-policy  administrator IAM
 ```
 
-The split is deliberate. `scene` operates with bounded, short-lived Scene
-authority; `infra` mutates persistent IAM with administrator authority. Shared
-conventions across both groups:
+The split is deliberate. `genesis` uses the selected operator identity to author
+immutable packages, `scene` operates with bounded short-lived authority, and
+`infra` mutates persistent IAM with administrator authority. Shared conventions:
 
 | Concern | Convention |
 | --- | --- |
-| Credentials | Selected with `--profile` / `--region` and resolved by boto3; no command accepts key material, tokens, or ARN-bearing secrets as arguments |
+| Credentials | Selected with `--profile` / `--region` and resolved by boto3; no command accepts key material or tokens |
 | Output | Human-readable on stdout by default, `--json` for a stable versioned document |
-| Confirmation | Read-only verbs never prompt; mutating verbs require confirmation or `--yes` |
+| Confirmation | Read-only and `--dry-run` operations never prompt; mutating operator/admin verbs require confirmation or `--yes` |
 | Exit codes | `0` success, `1` typed refusal or failure, `2` usage error |
-| Safety | No credentials, secret material, or handler inputs/outputs are printed |
+| Safety | Receipts omit credentials, object bodies, metadata values, and tokens |
+
+#### Author a genesis package
+
+`pearls genesis author` freezes one local tree and publishes it with the
+operator's boto3 identity. A valid tree contains UTF-8 `README.md`, a UTF-8
+`outputs.json` object whose selectors are valid and non-overlapping, a selected
+Python handler that parses and statically binds module-level `handler`, and at
+least one regular file below `input/`. The selected handler defaults to
+`protocol/handler.py`; `--handler-key LOGICAL_KEY` chooses another safe relative
+logical key, which must also be supplied to later `pearls scene` commands.
+Traversal is recursive and sorted by relative POSIX logical key. Every regular
+file is read once into an immutable plan; symlinks, devices/FIFOs, unreadable
+files or directories, unsafe relative paths, and logical-key collisions are
+refused. Traversal pins root and child directory descriptors so concurrent
+symlink swaps cannot escape the selected tree. For each regular file, device,
+inode, mode, size, modification time, and change time must remain identical at
+discovery, immediately after open, and after the complete read while its
+descriptor remains open. Authoring fails closed on platforms without
+descriptor-relative filesystem APIs.
+
+```console
+pearls genesis author ./trial001-genesis \
+  --destination proj/trial001-worker@quilt-dev \
+  --revision-id genesis-trial001-v1 \
+  --metadata @genesis-meta.json \
+  --message "Author Trial 001 worker genesis" \
+  --seal-input 'quilt+s3://source-registry#package=reference%2Frubric&top_hash=<64 hex characters>&path=rubrics%2Ftrial001.json' \
+  --yes --json
+```
+
+`--destination NAME@BUCKET`, `--metadata`, and a nonblank `--message` are
+required. Metadata uses the same inline JSON or `@file` convention as Scene
+publication. `--revision-id ID` optionally supplies the reusable publication
+identity using the same 2–64 safe-character grammar as Scene publication;
+`latest` is reserved. When omitted, a collision-resistant ID is generated and
+shown in approval material before the first write. Operators should save that
+ID, or explicitly supply one, so a command restarted after a lost response can
+assert the same idempotent intent instead of creating a second revision. Reusing
+an ID with different bytes or declarations is refused. The declaration bound to
+the create-only revision includes the selected handler key and canonical exact
+seal provenance, so equal copied bytes cannot relabel an old revision with a
+different source package, physical VersionId, or handler selection. The destination workflow
+is the required named workflow `genesis` by default; `--workflow ID` selects
+another named workflow, and there is deliberately no no-workflow escape for
+authoring.
+
+`--seal-input` is repeatable and has a dedicated strict grammar:
+
+```text
+quilt+s3://REGISTRY#package=NAME&top_hash=64HEX&path=LOGICAL_KEY
+```
+
+The package name and logical key are fragment values and should be percent
+encoded. Raw leading or trailing URI whitespace is refused; a legitimate space
+inside a logical key remains valid when encoded as `%20`. Floating references,
+hash prefixes, duplicate/extra fields, empty or directory-like paths, malformed
+encoding, duplicate sources, and destination collisions are refused. A source key `X/Y` becomes `input/X/Y`. The operator
+client reads `.quilt/packages/<top_hash>`, parses it locally without registry
+telemetry, recomputes the Quilt top hash, then reads the selected object by its
+exact S3 `VersionId` and verifies its declared Quilt content hash. The bytes are
+copied into the new package; a foreign physical S3 reference is never retained.
+
+`--dry-run` performs the complete local layout, selected-handler,
+sealed-source, destination versioning, and workflow
+metadata/entries/message/handle validation. It performs zero writes, never
+prompts, and reports a non-durable `planned_revision_id` that can be saved for a
+later real invocation. The durable revision ID, S3 version identities, top hash,
+and pinned URI remain null rather than being invented. A real publication
+prompts only after that preparation unless `--yes` is present; approval material
+always includes the planned revision ID before any write. Publication then uses
+the exact frozen bytes via the same revision-safe publisher used by Scenes. New
+publications recheck versioning and the named workflow immediately before their
+first write. A durable, same-intent retry that needs no write returns its stored
+disposition even if the current workflow changed. An interrupted revision whose
+original `latest` base was absent revalidates before a create-only recovery; one
+whose base was present remains durable but does not replay an ETag-only transition
+that cannot be conditioned on the recorded VersionId. A durable CAS loser is
+still exit 0 with status `published-not-latest`. In JSON receipts,
+`mutations_performed` lists `publish_package` only when this invocation completed
+a package-path or `latest` write; completed and superseded status-only retries
+report an empty list. Human success prints the canonical, round-trippable pinned
+URI first; package-name slashes are percent encoded.
+
+The authoring identity needs local read access; `s3:GetBucketVersioning` on the
+destination; `s3:GetObject` for current destination workflow/config/schema and
+package pointers; `s3:GetObjectVersion` for any workflow schema URL carrying a
+`versionId` at its configured bucket/key; `s3:PutObject` for `<name>/*`,
+`.quilt/packages/*`, and `.quilt/named_packages/<name>/*`; and, when sealing,
+`s3:GetObject` for the foreign manifest plus `s3:GetObjectVersion` for selected
+data. It needs no STS, Scene role, worker session, IAM, CloudFormation, bucket
+listing, delete, or foreign write permission. Authoring validates code identity and static shape,
+not handler safety: it never executes `protocol/handler.py`. Bucket Object Lock,
+bucket policies, lifecycle rules, and cleanup of unreferenced versions after a
+mid-publication failure remain operator responsibilities.
 
 A sealed-genesis Scene carries its executable protocol at
 `protocol/handler.py`, alongside the `README.md` control prompt, `outputs.json`

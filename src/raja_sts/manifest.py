@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import io
 import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from .errors import InvalidManifestURI, InvalidScopeError, ManifestLoadError
+from quilt3 import checksums
+
+from .errors import (
+    AuthorityModeError,
+    InputIntegrityError,
+    InvalidManifestURI,
+    InvalidScopeError,
+    ManifestLoadError,
+)
 from .models import (
     ManifestObject,
     OutputPackage,
@@ -39,6 +48,19 @@ def _validate_package_name(name: str, *, error_type: type[ValueError]) -> None:
         raise error_type(f"Invalid Quilt package name: {name!r}")
     if any(not _PACKAGE_SEGMENT_RE.fullmatch(part) for part in parts):
         raise error_type(f"Invalid Quilt package name: {name!r}")
+
+
+def format_manifest_uri(*, bucket: str, package_name: str, top_hash: str) -> str:
+    """Return the canonical URI for one immutable Quilt package revision.
+
+    Package names are encoded as one fragment value, including their ``/``
+    separators, so the result round-trips through :func:`parse_manifest_uri`.
+    """
+    _validate_bucket(bucket, error_type=InvalidManifestURI)
+    _validate_package_name(package_name, error_type=InvalidManifestURI)
+    if not _HASH_RE.fullmatch(top_hash):
+        raise InvalidManifestURI("top_hash must be the complete 64-character hexadecimal hash")
+    return f"quilt+s3://{bucket}#package={quote(package_name, safe='')}&top_hash={top_hash.lower()}"
 
 
 def parse_manifest_uri(manifest_uri: str) -> PinnedManifestURI:
@@ -242,8 +264,23 @@ def _entry_to_object(logical_key: str, entry: Any) -> ManifestObject:
     )
 
 
+def _verified_manifest_objects(
+    package: Any,
+    manifest: PinnedManifestURI,
+) -> tuple[ManifestObject, ...]:
+    actual_hash = package.top_hash
+    if not isinstance(actual_hash, str) or actual_hash.lower() != manifest.top_hash:
+        raise ManifestLoadError(
+            f"Loaded manifest hash {actual_hash!r} does not match {manifest.top_hash!r}"
+        )
+    objects = tuple(_entry_to_object(key, entry) for key, entry in package.walk())
+    if not objects:
+        raise ManifestLoadError("Pinned Quilt manifest contains no objects")
+    return objects
+
+
 def load_quilt_manifest(manifest: PinnedManifestURI) -> tuple[ManifestObject, ...]:
-    """Load and verify a pinned Quilt manifest using the caller's AWS identity."""
+    """Load and verify a pinned Quilt manifest through Quilt's registry client."""
     try:
         from quilt3 import Package
 
@@ -252,17 +289,91 @@ def load_quilt_manifest(manifest: PinnedManifestURI) -> tuple[ManifestObject, ..
             registry=manifest.registry,
             top_hash=manifest.top_hash,
         )
-        actual_hash = package.top_hash
-        if actual_hash.lower() != manifest.top_hash:
-            raise ManifestLoadError(
-                f"Loaded manifest hash {actual_hash!r} does not match {manifest.top_hash!r}"
-            )
-        objects = tuple(_entry_to_object(key, entry) for key, entry in package.walk())
+        return _verified_manifest_objects(package, manifest)
     except ManifestLoadError:
         raise
     except Exception as error:
         raise ManifestLoadError(f"Unable to load pinned Quilt manifest: {error}") from error
 
-    if not objects:
-        raise ManifestLoadError("Pinned Quilt manifest contains no objects")
-    return objects
+
+def load_quilt_manifest_from_s3(
+    manifest: PinnedManifestURI,
+    *,
+    s3_client: Any,
+) -> tuple[ManifestObject, ...]:
+    """Load a pinned Quilt manifest through exactly one caller-supplied S3 client.
+
+    The content-addressed manifest bytes are parsed in memory with Quilt's local
+    serializer. Their semantic top hash is recomputed before any physical entry is
+    trusted; no registry lookup, telemetry call, or ambient AWS client is used.
+    """
+    try:
+        from quilt3 import Package
+
+        response = s3_client.get_object(
+            Bucket=manifest.bucket,
+            Key=f".quilt/packages/{manifest.top_hash}",
+        )
+        body = response["Body"]
+        try:
+            content = body.read()
+        finally:
+            body.close()
+        if not isinstance(content, bytes):
+            raise TypeError("manifest body did not return bytes")
+        package = Package._load(io.StringIO(content.decode("utf-8")))
+        return _verified_manifest_objects(package, manifest)
+    except ManifestLoadError:
+        raise
+    except Exception as error:
+        raise ManifestLoadError(
+            "Unable to load pinned Quilt manifest through the supplied S3 client"
+        ) from error
+
+
+def _calculate_hash(hash_type: str, content: bytes) -> str:
+    if hash_type == checksums.SHA256_HASH_NAME:
+        result = checksums.legacy_calculate_checksum_bytes(content)
+    elif hash_type in (checksums.SHA256_CHUNKED_HASH_NAME, checksums.CRC64NVME_HASH_NAME):
+        result = checksums.calculate_multipart_checksum_bytes(content, checksum_type=hash_type)
+    else:
+        raise InputIntegrityError(f"Unsupported Quilt content hash type: {hash_type!r}")
+    if not isinstance(result, str):
+        raise InputIntegrityError(f"Invalid Quilt content hash result for {hash_type!r}")
+    return result
+
+
+def read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
+    """Read one manifest entry by exact S3 version and verify its Quilt hash."""
+    if item.version_id is None or item.hash_type is None or item.hash_value is None:
+        raise AuthorityModeError(
+            f"Selected input {item.logical_key!r} lacks a version ID or content hash"
+        )
+    try:
+        response = s3_client.get_object(
+            Bucket=item.bucket,
+            Key=item.key,
+            VersionId=item.version_id,
+        )
+        if response.get("VersionId") != item.version_id:
+            raise InputIntegrityError(
+                f"S3 returned the wrong version for selected input {item.logical_key!r}"
+            )
+        body = response["Body"]
+        try:
+            content = body.read()
+        finally:
+            body.close()
+        if not isinstance(content, bytes):
+            raise TypeError("S3 body did not return bytes")
+    except InputIntegrityError:
+        raise
+    except Exception as error:
+        raise InputIntegrityError(
+            f"Unable to read selected input {item.logical_key!r}: {error}"
+        ) from error
+
+    actual = _calculate_hash(item.hash_type, content)
+    if actual != item.hash_value:
+        raise InputIntegrityError(f"Content hash mismatch for selected input {item.logical_key!r}")
+    return content

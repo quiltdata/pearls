@@ -9,18 +9,26 @@ from datetime import UTC, datetime
 from typing import Any
 
 import boto3
-from quilt3 import checksums
 
 from .bedrock import BedrockInvocation, BedrockProfileLoader, bedrock_model_region
 from .errors import (
     AuthorityModeError,
     HandlerContractError,
-    InputIntegrityError,
     InvalidScopeError,
-    ManifestLoadError,
     PublicationError,
 )
-from .manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
+from .genesis import (
+    decode_genesis_readme,
+    parse_genesis_outputs,
+    validate_genesis_layout_keys,
+)
+from .manifest import (
+    ManifestLoader,
+    format_manifest_uri,
+    load_quilt_manifest,
+    parse_manifest_uri,
+    read_manifest_object,
+)
 from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector, PinnedManifestURI
 from .policy import DEFAULT_MAX_POLICY_CHARACTERS, compile
 from .publication import PublicationInvariant, PublicationResult, publish_package
@@ -98,10 +106,11 @@ class SceneRunResult:
 
     @property
     def package_uri(self) -> str:
-        """Return the immutable output package URI."""
-        return (
-            f"quilt+s3://{self.output_package.bucket}#package="
-            f"{self.output_package.name}&top_hash={self.top_hash}"
+        """Return the canonical immutable output package URI."""
+        return format_manifest_uri(
+            bucket=self.output_package.bucket,
+            package_name=self.output_package.name,
+            top_hash=self.top_hash,
         )
 
 
@@ -109,59 +118,6 @@ SceneHandler = Callable[
     [Mapping[str, MaterializedInput], Any, SceneContext],
     SceneHandlerResult,
 ]
-
-
-def _calculate_hash(hash_type: str, content: bytes) -> str:
-    if hash_type == checksums.SHA256_HASH_NAME:
-        result = checksums.legacy_calculate_checksum_bytes(content)
-    elif hash_type in (checksums.SHA256_CHUNKED_HASH_NAME, checksums.CRC64NVME_HASH_NAME):
-        result = checksums.calculate_multipart_checksum_bytes(content, checksum_type=hash_type)
-    else:
-        raise InputIntegrityError(f"Unsupported Quilt content hash type: {hash_type!r}")
-    if not isinstance(result, str):
-        raise InputIntegrityError(f"Invalid Quilt content hash result for {hash_type!r}")
-    return result
-
-
-def read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
-    """Read one manifest entry by exact S3 version and verify its Quilt content hash.
-
-    The caller supplies the identity. Under a Scene session this reads a selected
-    input; under the trusted bootstrap identity it reads a sealed genesis control
-    object before any Scene credential exists.
-    """
-    if item.version_id is None or item.hash_type is None or item.hash_value is None:
-        raise AuthorityModeError(
-            f"Selected input {item.logical_key!r} lacks a version ID or content hash"
-        )
-    try:
-        response = s3_client.get_object(
-            Bucket=item.bucket,
-            Key=item.key,
-            VersionId=item.version_id,
-        )
-        if response.get("VersionId") != item.version_id:
-            raise InputIntegrityError(
-                f"S3 returned the wrong version for selected input {item.logical_key!r}"
-            )
-        body = response["Body"]
-        try:
-            content = body.read()
-        finally:
-            body.close()
-        if not isinstance(content, bytes):
-            raise TypeError("S3 body did not return bytes")
-    except InputIntegrityError:
-        raise
-    except Exception as error:
-        raise InputIntegrityError(
-            f"Unable to read selected input {item.logical_key!r}: {error}"
-        ) from error
-
-    actual = _calculate_hash(item.hash_type, content)
-    if actual != item.hash_value:
-        raise InputIntegrityError(f"Content hash mismatch for selected input {item.logical_key!r}")
-    return content
 
 
 def _read_inputs(s3_client: Any, compilation: CompiledPolicy) -> dict[str, MaterializedInput]:
@@ -459,33 +415,11 @@ def _genesis_objects(
     loader: ManifestLoader,
 ) -> tuple[tuple[ManifestObject, ...], dict[str, ManifestObject]]:
     objects = tuple(loader(genesis))
-    by_key: dict[str, ManifestObject] = {}
-    for item in objects:
-        if item.logical_key in by_key:
-            raise ManifestLoadError(
-                f"Genesis package contains duplicate logical key: {item.logical_key!r}"
-            )
-        by_key[item.logical_key] = item
-    missing = {"README.md", "outputs.json"} - set(by_key)
-    if missing:
-        raise ManifestLoadError(
-            "Genesis package is missing required control object(s): " + ", ".join(sorted(missing))
-        )
-    if not any(item.logical_key.startswith("input/") for item in objects):
-        raise ManifestLoadError("Genesis package must contain at least one input/ object")
-    return objects, by_key
-
-
-def _parse_outputs_json(content: bytes) -> dict[str, object]:
-    try:
-        value = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise InvalidScopeError(
-            f"outputs.json must contain a UTF-8 JSON object: {error}"
-        ) from error
-    if not isinstance(value, dict):
-        raise InvalidScopeError("outputs.json must contain a URI-to-description object")
-    return value
+    validate_genesis_layout_keys(
+        (item.logical_key for item in objects),
+        require_handler=False,
+    )
+    return objects, {item.logical_key: item for item in objects}
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,11 +459,10 @@ def preflight_genesis(
     objects, by_key = _genesis_objects(genesis, loader)
     control_client = genesis_s3_client or boto3.client("s3")
     prompt_bytes = read_manifest_object(control_client, by_key["README.md"])
-    try:
-        control_prompt = prompt_bytes.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ManifestLoadError("Genesis README.md must be UTF-8 text") from error
-    writable = _parse_outputs_json(read_manifest_object(control_client, by_key["outputs.json"]))
+    control_prompt = decode_genesis_readme(prompt_bytes)
+    writable, _selectors = parse_genesis_outputs(
+        read_manifest_object(control_client, by_key["outputs.json"])
+    )
     scope: dict[str, object] = {
         "readable": ["input/"],
         "writable": writable,
