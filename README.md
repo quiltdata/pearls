@@ -975,11 +975,11 @@ run.
   no verb can delete a stack, a role, or an object.
 - The publisher requires output bucket versioning before its first write and
   requires every S3 write to return a non-null version ID. Each invocation gets
-  a create-only revision pointer; `latest` is a final, generation-checked ETag
-  compare-and-swap. A present-base advance rereads the exact ETag and VersionId
-  immediately before that write, which catches a same-body generation change
-  during package writes, but S3 cannot fence another same-body rewrite in the
-  final read-to-write interval because destination `PutObject` has no VersionId
+  a create-only revision pointer; a present-base `latest` update performs an
+  exact ETag-and-VersionId reread followed by a final ETag/value
+  compare-and-swap. That reread catches a same-body generation change during
+  package writes, but S3 cannot fence another same-body rewrite in the final
+  read-to-write interval because destination `PutObject` has no VersionId
   condition. Quilt's raw top-hash pointer cannot carry a unique generation token,
   so `is_latest` reports current package content rather than ownership of one
   pointer version; exact generation fencing would require another coordination

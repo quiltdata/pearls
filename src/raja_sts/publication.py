@@ -581,9 +581,9 @@ def _advance_latest(
         # If-Match alone cannot see that ABA transition. The base was observed
         # before this revision's data, manifest, and pointer writes, so confirm
         # the recorded generation immediately before the swap instead of letting
-        # ETag equality stand in for it across that whole window. A generation
-        # this revision did not observe is another writer's, so this revision
-        # loses arbitration rather than overwriting it.
+        # ETag equality stand in for it across that whole window. A different
+        # generation visible at this reread is another writer's, so this
+        # revision loses arbitration rather than overwriting it.
         observed = _read_pointer(s3_client, bucket=output.bucket, key=latest_key)
         if not _snapshot_matches(observed, base):
             return _latest_without_this_write(observed, top_hash)
