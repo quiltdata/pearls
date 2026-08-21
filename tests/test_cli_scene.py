@@ -365,7 +365,7 @@ def test_check_requires_an_explicit_runtime_requirements_control() -> None:
 
 
 @pytest.mark.parametrize("kind", ["nested", "integer"])
-def test_check_normalizes_pathological_requirements_json_to_a_typed_refusal(
+def test_check_rejects_pathological_requirements_json_before_authority(
     kind: str,
 ) -> None:
     harness = SceneHarness(GenesisFixture(requirements=_pathological_requirements(kind)))
@@ -374,7 +374,6 @@ def test_check_normalizes_pathological_requirements_json_to_a_typed_refusal(
 
     assert code == 1
     assert "RuntimeRequirementsError" in harness.streams.stderr
-    assert "UTF-8 JSON object" in harness.streams.stderr
     assert "Traceback" not in harness.streams.stderr
     assert harness.sts.requests == []
     assert harness.events == []

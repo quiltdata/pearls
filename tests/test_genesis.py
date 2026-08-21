@@ -149,11 +149,28 @@ def test_runtime_requirements_reject_malformed_documents(content: bytes, message
 
 
 @pytest.mark.parametrize("kind", ["nested", "integer"])
-def test_pathological_json_is_normalized_to_a_typed_refusal(kind: str) -> None:
-    with pytest.raises(RuntimeRequirementsError, match="UTF-8 JSON object") as raised:
+def test_pathological_json_is_a_typed_refusal_across_decoders(kind: str) -> None:
+    with pytest.raises(RuntimeRequirementsError):
         parse_runtime_requirements(_pathological_json(kind))
 
-    assert isinstance(raised.value.__cause__, (RecursionError, ValueError))
+
+@pytest.mark.parametrize("error_type", [ValueError, RecursionError])
+def test_decoder_limit_failures_are_normalized_to_a_typed_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    content = _document()
+    decoder_error = error_type("decoder limit")
+
+    def fail_decode(*args: object, **kwargs: object) -> object:
+        raise decoder_error
+
+    monkeypatch.setattr("raja_sts.genesis.json.loads", fail_decode)
+
+    with pytest.raises(RuntimeRequirementsError, match="UTF-8 JSON object") as raised:
+        parse_runtime_requirements(content)
+
+    assert raised.value.__cause__ is decoder_error
 
 
 @pytest.mark.parametrize(
