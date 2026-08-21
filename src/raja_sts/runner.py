@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,11 +18,12 @@ from .errors import (
     InputIntegrityError,
     InvalidScopeError,
     ManifestLoadError,
+    PublicationError,
 )
 from .manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
 from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector, PinnedManifestURI
 from .policy import DEFAULT_MAX_POLICY_CHARACTERS, compile
-from .publication import publish_package
+from .publication import PublicationInvariant, PublicationResult, publish_package
 from .sts import mint_compiled
 
 SCENE_RECORD_SCHEMA = "https://quiltdata.com/schemas/raja-sts/scene-execution/v1"
@@ -72,10 +73,11 @@ class SceneContext:
 
 @dataclass(frozen=True, slots=True)
 class SceneHandlerResult:
-    """Objects and safe invocation metadata returned by one handler call."""
+    """Objects, invocation evidence, and run-derived package metadata."""
 
     objects: Mapping[str, bytes | str]
     invocation: Mapping[str, Any]
+    output_meta: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,10 +86,15 @@ class SceneRunResult:
 
     scene_id: str
     output_package: OutputPackage
-    top_hash: str
+    publication: PublicationResult
     assumed_role_arn: str
     started_at: datetime
     completed_at: datetime
+
+    @property
+    def top_hash(self) -> str:
+        """Return the immutable published top hash (compatibility accessor)."""
+        return self.publication.top_hash
 
     @property
     def package_uri(self) -> str:
@@ -179,7 +186,10 @@ def _validate_logical_key(key: object) -> str:
 def _contains_secret(value: object, secret_values: frozenset[str]) -> bool:
     if isinstance(value, Mapping):
         for key, child in value.items():
-            normalized = str(key).lower().replace("-", "_")
+            key_text = str(key)
+            if any(secret and secret in key_text for secret in secret_values):
+                return True
+            normalized = key_text.lower().replace("-", "_")
             if any(fragment in normalized for fragment in _SECRET_KEY_FRAGMENTS):
                 return True
             if _contains_secret(child, secret_values):
@@ -194,7 +204,7 @@ def _validate_handler_result(
     result: object,
     secret_values: frozenset[str],
     writable_selectors: Sequence[OutputSelector] = (),
-) -> tuple[dict[str, bytes], bytes]:
+) -> tuple[dict[str, bytes], bytes, dict[str, Any]]:
     if not isinstance(result, SceneHandlerResult):
         raise HandlerContractError("handler must return SceneHandlerResult")
     if not isinstance(result.objects, Mapping) or not result.objects:
@@ -221,7 +231,42 @@ def _validate_handler_result(
         raise HandlerContractError(
             f"handler invocation metadata must be JSON-serializable: {error}"
         ) from error
-    return objects, invocation_bytes
+
+    if not isinstance(result.output_meta, Mapping):
+        raise HandlerContractError("handler output metadata must be a mapping")
+    if _contains_secret(result.output_meta, secret_values):
+        raise HandlerContractError("handler output metadata contains credential material")
+    handler_meta = dict(result.output_meta)
+    try:
+        _json_bytes(handler_meta)
+    except (TypeError, ValueError) as error:
+        raise HandlerContractError(
+            f"handler output metadata must be JSON-serializable: {error}"
+        ) from error
+    return objects, invocation_bytes, handler_meta
+
+
+def _merge_output_meta(
+    caller_meta: Mapping[str, Any] | None,
+    handler_meta: Mapping[str, Any],
+    secret_values: frozenset[str],
+) -> dict[str, Any]:
+    if caller_meta is not None and not isinstance(caller_meta, Mapping):
+        raise PublicationError("output_meta must be a mapping")
+    declared = dict(caller_meta) if caller_meta else {}
+    if _contains_secret(declared, secret_values):
+        raise PublicationError("output_meta contains credential material")
+    try:
+        _json_bytes(declared)
+    except (TypeError, ValueError) as error:
+        raise PublicationError(f"output_meta must be JSON-serializable: {error}") from error
+    collisions = set(declared).intersection(handler_meta)
+    if collisions:
+        raise HandlerContractError(
+            "handler output metadata collides with caller metadata: "
+            + ", ".join(repr(key) for key in sorted(collisions, key=str))
+        )
+    return {**declared, **handler_meta}
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -268,6 +313,7 @@ def _execute_compiled_scene(
     output_meta: Mapping[str, Any] | None = None,
     output_message: str | None = None,
     output_workflow: str | None | object = ...,
+    output_invariants: Sequence[PublicationInvariant] = (),
 ) -> SceneRunResult:
     invocation = _validate_runner_authority(compilation)
     credentials = mint_compiled(
@@ -291,11 +337,12 @@ def _execute_compiled_scene(
     )
     handler_result = handler(inputs, session, context)
     secret_values = frozenset(credentials.boto3_kwargs().values())
-    objects, invocation_bytes = _validate_handler_result(
+    objects, invocation_bytes, handler_output_meta = _validate_handler_result(
         handler_result,
         secret_values,
         compilation.writable_selectors,
     )
+    merged_output_meta = _merge_output_meta(output_meta, handler_output_meta, secret_values)
     completed_at = clock()
 
     scene_record: dict[str, Any] = {
@@ -324,6 +371,7 @@ def _execute_compiled_scene(
         "output": {
             "name": compilation.output_package.name,
             "bucket": compilation.output_package.bucket,
+            "revision_id": scene_id,
         },
         "timestamps": {
             "started_at": _iso8601(started_at),
@@ -332,19 +380,21 @@ def _execute_compiled_scene(
     }
     objects["run/scene.json"] = _json_bytes(scene_record)
     objects["run/invocation.json"] = invocation_bytes
-    top_hash = publish_package(
+    publication = publish_package(
         s3_client=s3_client,
         output=compilation.output_package,
         objects=objects,
         timestamp=completed_at,
-        user_meta=output_meta,
+        revision_id=scene_id,
+        user_meta=merged_output_meta,
         message=output_message,
         workflow=output_workflow,
+        invariants=output_invariants,
     )
     return SceneRunResult(
         scene_id=scene_id,
         output_package=compilation.output_package,
-        top_hash=top_hash,
+        publication=publication,
         assumed_role_arn=credentials.assumed_role_arn,
         started_at=started_at,
         completed_at=completed_at,
@@ -369,13 +419,12 @@ def run_scene(
     output_meta: Mapping[str, Any] | None = None,
     output_message: str | None = None,
     output_workflow: str | None | object = ...,
+    output_invariants: Sequence[PublicationInvariant] = (),
 ) -> SceneRunResult:
     """Compile, mint, execute, and publish exactly one bounded Scene.
 
-    ``output_meta``, ``output_message``, and ``output_workflow`` are applied to
-    the published output package and validated against the destination
-    registry's workflow contract before anything is written (see
-    :func:`raja_sts.publication.publish_package`).
+    Caller and handler ``output_meta`` are merged without collisions before the
+    workflow contract and ``output_invariants`` validate the final revision.
     """
     started_at = clock()
     compilation = compile(
@@ -385,6 +434,7 @@ def run_scene(
         max_policy_characters=max_policy_characters,
         include_manifest_read=False,
         bedrock_profile_loader=bedrock_profile_loader,
+        output_revision_id=scene_id,
     )
     return _execute_compiled_scene(
         compilation=compilation,
@@ -400,6 +450,7 @@ def run_scene(
         output_meta=output_meta,
         output_message=output_message,
         output_workflow=output_workflow,
+        output_invariants=output_invariants,
     )
 
 
@@ -458,6 +509,7 @@ def preflight_genesis(
     manifest_loader: ManifestLoader | None = None,
     genesis_s3_client: Any | None = None,
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
+    output_revision_id: str | None = None,
 ) -> GenesisPreflight:
     """Resolve, verify, and compile one pinned genesis package without minting.
 
@@ -493,6 +545,7 @@ def preflight_genesis(
         max_policy_characters=max_policy_characters,
         include_manifest_read=False,
         bedrock_profile_loader=bedrock_profile_loader,
+        output_revision_id=output_revision_id,
     )
     return GenesisPreflight(
         genesis=genesis,
@@ -524,12 +577,12 @@ def run_scene_from_genesis(
     output_meta: Mapping[str, Any] | None = None,
     output_message: str | None = None,
     output_workflow: str | None | object = ...,
+    output_invariants: Sequence[PublicationInvariant] = (),
 ) -> SceneRunResult:
     """Boot one Scene from a pinned genesis package and its immutable controls.
 
-    ``output_meta``, ``output_message``, and ``output_workflow`` are applied to
-    the published output package and validated against the destination
-    registry's workflow contract before anything is written.
+    Caller and handler ``output_meta`` are merged without collisions before the
+    workflow contract and ``output_invariants`` validate the final revision.
     """
     started_at = clock()
     preflight = preflight_genesis(
@@ -540,6 +593,7 @@ def run_scene_from_genesis(
         manifest_loader=manifest_loader,
         genesis_s3_client=genesis_s3_client,
         max_policy_characters=max_policy_characters,
+        output_revision_id=scene_id,
     )
     return _execute_compiled_scene(
         compilation=preflight.compilation,
@@ -556,4 +610,5 @@ def run_scene_from_genesis(
         output_meta=output_meta,
         output_message=output_message,
         output_workflow=output_workflow,
+        output_invariants=output_invariants,
     )

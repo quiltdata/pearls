@@ -26,7 +26,7 @@ from ..errors import InvalidScopeError, RajaStsError
 from ..manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
 from ..models import ManifestObject, PinnedManifestURI
 from ..policy import DEFAULT_MAX_POLICY_CHARACTERS
-from ..runner import SceneContext, SceneHandler, SceneHandlerResult
+from ..runner import SceneContext, SceneHandler, SceneHandlerResult, SceneRunResult
 from ..sealed import SEALED_HANDLER_KEY, SealedSource
 from ..sts import validate_assume_role_request
 from ._common import (
@@ -340,6 +340,7 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
         manifest_loader=loader,
         genesis_s3_client=s3_client,
         max_policy_characters=DEFAULT_MAX_POLICY_CHARACTERS,
+        output_revision_id=scene_id,
     )
     record(
         "genesis-manifest-resolved",
@@ -443,11 +444,11 @@ def _receipt(
     sealed: SealedSource,
     args: argparse.Namespace,
     invocation: BedrockInvocation,
-    metadata: Mapping[str, Any],
     workflow_display: str | None,
-    result: Any,
+    result: SceneRunResult,
 ) -> dict[str, Any]:
-    payload = envelope(SCENE_RUN_SCHEMA, "published")
+    publication = result.publication
+    payload = envelope(SCENE_RUN_SCHEMA, publication.status)
     payload.update(
         {
             "scene_id": scene_id,
@@ -462,8 +463,14 @@ def _receipt(
                 "bucket": result.output_package.bucket,
                 "top_hash": result.top_hash,
                 "package_uri": result.package_uri,
+                "revision_id": publication.revision_id,
+                "revision_version_id": publication.revision_version_id,
+                "is_latest": publication.is_latest,
+                "reused_revision": publication.reused_revision,
+                "previous_top_hash": publication.previous_top_hash,
+                "latest_top_hash": publication.latest_top_hash,
                 # Keys only: metadata values are never echoed back implicitly.
-                "metadata_keys": sorted(metadata),
+                "metadata_keys": list(publication.metadata_keys),
                 "message_provided": bool(args.message),
                 "workflow": workflow_display,
             },
@@ -555,7 +562,6 @@ def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
         sealed=sealed,
         args=args,
         invocation=invocation,
-        metadata=metadata,
         workflow_display=workflow_display,
         result=result,
     )
@@ -565,6 +571,9 @@ def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
         [
             ("scene id", scene_id),
             ("assumed role", result.assumed_role_arn),
+            ("publication", result.publication.status),
+            ("revision id", result.publication.revision_id),
+            ("is latest", str(result.publication.is_latest).lower()),
             ("output top hash", result.top_hash),
             ("started at", iso8601(result.started_at)),
             ("completed at", iso8601(result.completed_at)),

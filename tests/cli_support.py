@@ -52,6 +52,7 @@ def handler(inputs, session, context):
     return SceneHandlerResult(
         {"result/answer.txt": context.control_prompt or ""},
         {"input_count": len(inputs)},
+        {"handler_metric": len(inputs)},
     )
 '''
 
@@ -173,10 +174,11 @@ class FakeWorkerS3:
         self.events = events
         self.get_requests: list[dict[str, Any]] = []
         self.put_requests: list[dict[str, Any]] = []
+        self.fail_latest = False
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
         key = str(kwargs.get("Key", ""))
-        if key.startswith(".quilt/workflows/"):
+        if key.startswith((".quilt/workflows/", ".quilt/named_packages/")):
             raise MissingKey()
         self.events.append("worker-get")
         self.get_requests.append(kwargs)
@@ -189,6 +191,8 @@ class FakeWorkerS3:
     def put_object(self, **kwargs: Any) -> dict[str, str]:
         self.events.append(f"put:{kwargs['Key']}")
         self.put_requests.append(kwargs)
+        if self.fail_latest and str(kwargs["Key"]).endswith("/latest"):
+            raise MissingKey("PreconditionFailed")
         return {"VersionId": f"version-{len(self.put_requests)}"}
 
 

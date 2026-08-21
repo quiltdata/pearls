@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from os.path import commonprefix
 from typing import Any
 
@@ -23,6 +25,7 @@ from .manifest import (
 from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector, PolicyMode
 
 DEFAULT_MAX_POLICY_CHARACTERS = 2048
+_OUTPUT_REVISION_ID_RE = re.compile(r"^[A-Za-z0-9_+=,.@-]{2,64}$")
 _ALLOWED_SCOPE_KEYS = {
     "readable",
     "writable_package",
@@ -186,12 +189,17 @@ def _bedrock_statements(invocation: BedrockInvocation | None) -> list[dict[str, 
     ]
 
 
-def _current_read_statement(resources: Sequence[str]) -> dict[str, Any]:
-    """Allow current-object reads for exact versionless resources."""
+def _current_read_statement(_resources: Sequence[str]) -> dict[str, Any]:
+    """Allow reads only where the paired exact NotResource deny permits them.
+
+    The wildcard avoids duplicating every exact current-object ARN in the STS
+    plaintext policy. ``_guardrail_statements`` always emits the matching deny,
+    so IAM deny precedence leaves the effective read set unchanged.
+    """
     return {
         "Effect": "Allow",
         "Action": "s3:GetObject",
-        "Resource": _deduplicate(resources),
+        "Resource": "*",
     }
 
 
@@ -290,6 +298,7 @@ def compile(
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
     include_manifest_read: bool = True,
     bedrock_profile_loader: BedrockProfileLoader | None = None,
+    output_revision_id: str | None = None,
 ) -> CompiledPolicy:
     """Compile a pinned Quilt manifest and logical scope into an STS policy.
 
@@ -313,10 +322,20 @@ def compile(
         )
     if not isinstance(include_manifest_read, bool):
         raise ValueError("include_manifest_read must be a boolean")
+    if output_revision_id is not None and (
+        not isinstance(output_revision_id, str)
+        or not _OUTPUT_REVISION_ID_RE.fullmatch(output_revision_id)
+        or output_revision_id == "latest"
+    ):
+        raise InvalidScopeError(
+            "output_revision_id must be 2-64 safe Scene ID characters and not 'latest'"
+        )
 
     manifest = parse_manifest_uri(manifest_uri)
     selectors = _parse_readable(scope_spec.get("readable"))
     output, writable_selectors = _parse_output_scope(scope_spec)
+    if output_revision_id is not None:
+        output = replace(output, revision_id=output_revision_id)
     bedrock = parse_bedrock_invocation(
         scope_spec.get("bedrock_model"),
         scope_spec.get("bedrock_invoke_resources"),

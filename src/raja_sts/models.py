@@ -89,6 +89,7 @@ class OutputPackage:
     name: str
     bucket: str
     data_write_resources: tuple[str, ...] = ()
+    revision_id: str | None = None
 
     @property
     def bucket_arn(self) -> str:
@@ -117,13 +118,16 @@ class OutputPackage:
         return self.resources
 
     @property
-    def read_resources(self) -> tuple[str, str]:
-        """Return Quilt workflow and exact output-pointer read resources."""
+    def read_resources(self) -> tuple[str, ...]:
+        """Return workflow, latest, and this Scene's exact revision read resources."""
         root = f"arn:aws:s3:::{self.bucket}/.quilt/"
-        return (
+        resources = [
             f"{root}workflows/*",
             f"{root}named_packages/{self.name}/latest",
-        )
+        ]
+        if self.revision_id is not None:
+            resources.append(f"{root}named_packages/{self.name}/{self.revision_id}")
+        return tuple(resources)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +184,7 @@ class CompiledPolicy:
                 for item in self.selected_objects
             ],
             "writable_package": f"{self.output_package.name}@{self.output_package.bucket}",
+            "output_revision_id": self.output_package.revision_id,
             "writable_selectors": [
                 {
                     "uri": selector.original,

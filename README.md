@@ -75,8 +75,8 @@ The Pearls architecture distinguishes three levels of maturity:
 2. **Reference integration** — the proposed composition of those
    primitives into Scene-based execution isolation.
 3. **Validation frontier** — mechanisms that still need implementation and
-   stress testing (deterministic Scene sealing, output-package creation
-   semantics, domain-aware reconciliation).
+   stress testing (deterministic Scene sealing and cross-revision,
+   domain-aware reconciliation).
 
 Release 0.1.1 adds an alpha maturity-level 1→2 authority-compilation
 primitive: `raja_sts` compiles a pinned Quilt Package scope into an AWS STS
@@ -211,6 +211,7 @@ def handler(inputs, session, context):
     return SceneHandlerResult(
         objects={"result/response.txt": response["output"]["message"]["content"][0]["text"]},
         invocation={"request_id": response["ResponseMetadata"]["RequestId"]},
+        output_meta={"stop_reason": response["stopReason"]},
     )
 
 
@@ -271,11 +272,65 @@ inputs and never reread that manifest. The standalone `compile()`/`mint()` defau
 retains the manifest read for backward compatibility. This conservative narrowing
 leaves enough of the STS plaintext budget for exact profile closures.
 
-Handlers return bytes or strings plus JSON-serializable invocation metadata.
-The package always includes handler objects, `run/scene.json`, and
-`run/invocation.json`. See [`examples/hello_scene.py`](examples/hello_scene.py)
-for a thin one-Converse consumer. Prompt and response bodies remain explicit
-package objects rather than implicit metadata.
+Handlers return bytes or strings, JSON-serializable invocation evidence, and
+optional run-derived `output_meta`. Caller metadata and handler metadata are
+secret-screened, finite-JSON validated, and merged only when their top-level
+keys are disjoint; a collision is a `HandlerContractError`, never an implicit
+winner. The merged document is what workflow schemas and domain invariants
+validate and what the manifest records. The package always includes handler
+objects, `run/scene.json`, and `run/invocation.json`. See
+[`examples/hello_scene.py`](examples/hello_scene.py) for a thin one-Converse
+consumer. Prompt and response bodies remain explicit package objects rather
+than implicit metadata.
+
+A caller can compose content-aware checks without adding domain vocabulary to
+`raja_sts`. Each checker has a stable identifier and returns all findings it can
+establish from the final single-revision material:
+
+```python
+from raja_sts import PublicationContext
+
+
+class RequiredAssessment:
+    identifier = "trial-assessment/v1"
+
+    def check(self, pending: PublicationContext, /) -> tuple[str, ...]:
+        findings = []
+        if "assessment/verdict.json" not in pending.objects:
+            findings.append("assessment/verdict.json is required")
+        if "pass_count" not in pending.user_meta:
+            findings.append("pass_count metadata is required")
+        return tuple(findings)
+
+
+result = run_scene(
+    # ...the same arguments as above...
+    output_invariants=(RequiredAssessment(),),
+)
+```
+
+Workflow validation runs first, then all invariant checkers run over detached,
+read-only views of the complete object set, merged metadata, message, and output
+package name. Findings—including a checker that raises unexpectedly—are
+aggregated in `DomainInvariantError`; either refusal occurs before any write.
+The hook is intentionally single-revision: checks needing a prior manifest or
+lineage state require separately authorized resolution outside this interface.
+
+`scene_id` is also the collision-safe publication revision identity. A retry of
+`publish_package` with the same identity and byte-for-byte intent reuses the
+recorded revision without multiplying writes; different intent under that
+identity raises `PublicationConflictError`. A deliberate re-execution uses a new
+Scene ID and appends another revision, even in the same second. Publication
+writes data, the immutable manifest, and a create-only revision pointer before
+conditionally advancing `latest`: first publication uses `If-None-Match`, later
+ones use `If-Match` on the observed ETag. A CAS loser still returns a durable
+`PublicationResult` with `status="published-not-latest"`; it is not reported as
+a total failure. The revision records its original CAS base ETag and S3 VersionId so
+an interrupted retry can finish that transition but cannot mistake a restored,
+newer `latest` version for the old base. After a conditional conflict the
+publisher rereads `latest`, so another retry that advanced the same top hash is
+reported accurately. `SceneRunResult.top_hash` remains a compatibility property
+over `SceneRunResult.publication.top_hash`.
 
 ### Boot from one genesis package
 
@@ -331,8 +386,9 @@ before minting the worker credential; their Quilt hashes are verified. Handlers
 run in-process as trusted execution code: they receive the scoped session that
 publication later uses, so selector and reserved-key checks constrain returned
 objects but are not a sandbox against a handler that makes direct S3 calls or
-retains the session. The low-level
-`run_scene(manifest_uri, scope_spec, ...)` API remains available unchanged.
+retains the session. The lower-level
+`run_scene(manifest_uri, scope_spec, ...)` API remains available with the same
+revision, metadata, and invariant semantics.
 
 ### Command line
 
@@ -422,13 +478,20 @@ pearls scene run \
 ```
 
 `--scene-id` is accepted; when omitted a collision-resistant valid
-`RoleSessionName` is generated. `--metadata` takes inline JSON or `@path`, and
-maps to the workflow-aware `output_meta`; `--message` and `--workflow` /
-`--no-workflow` map to `output_message` and `output_workflow`. The JSON receipt
-is versioned and contains only non-secret run identity: Scene ID, genesis
-URI/top hash, verified handler provenance, assumed-role ARN, the immutable
-output package URI and top hash, and timestamps. Metadata is reported by key
-only, and diagnostics go to stderr so `--json` stdout stays parseable.
+`RoleSessionName` is generated. It is also the output revision identity, so a
+new execution needs a new ID and reuse is an explicit idempotency assertion.
+`--metadata` takes inline JSON or `@path`, and maps to the workflow-aware caller
+half of `output_meta`; `--message` and `--workflow` / `--no-workflow` map to
+`output_message` and `output_workflow`. The run receipt schema is v2 and contains
+only non-secret identity: Scene ID, genesis URI/top hash, verified handler
+provenance, assumed-role ARN, immutable package URI/top hash, revision and S3
+version identities, whether the revision was reused, `latest` disposition, and
+timestamps. Its top-level status is `published` or `published-not-latest`;
+either is exit 0 because the revision is durable. Metadata from both caller and
+handler is reported by key only. `scene check` cannot know handler-derived keys
+because it never executes the handler, and the CLI does not dynamically load
+programmatic `output_invariants`. Diagnostics go to stderr so `--json` stdout
+stays parseable.
 
 Two boundaries survive the CLI unchanged. The **trusted bootstrap identity**
 reads the pinned manifest and the sealed control objects by exact version before
@@ -448,13 +511,16 @@ command claims no sandboxing and no ambient credential isolation.
 | Input Control | Only selected control logical keys resolve to versioned read resources. Sibling control files are absent from the allow set. |
 | Input Content | Selected content keys receive exact S3 object ARNs. One set-based deny admits only the selected `s3:VersionId` values, and S3 rejects a selected version ID when requested against a different object key. |
 | Output Content | `s3:PutObject` is limited to `<package-name>/*` in the declared output bucket. Quilt consumer validation may read `.quilt/workflows/*` in that bucket. |
-| Output Control | Quilt manifest blobs may be written under `.quilt/packages/*`; named-package pointers are limited to `.quilt/named_packages/<package-name>/*`, with an exact read of that package's `latest` pointer for conflict checking. |
+| Output Control | Quilt manifest blobs may be written under `.quilt/packages/*`; named-package writes are limited to `.quilt/named_packages/<package-name>/*`, with exact reads of that package's `latest` pointer and the current Scene ID's revision pointer for CAS and idempotency. Sibling revision pointers remain unreadable. |
 
 Every session policy explicitly denies deletes and bucket listing on all
 resources. Action-specific `NotResource` guardrails prevent bucket policies
-from restoring out-of-scope current-object reads or writes. Exact version mode
-uses one global mismatch deny containing the sealed set of S3 version IDs and
-one resource-set allow containing the selected object ARNs. Because S3 version
+from restoring out-of-scope current-object reads or writes. To stay within the
+STS plaintext budget, current-object `GetObject` and output `PutObject` use
+compact wildcard allows paired with those exact denies; IAM deny precedence
+keeps their effective resource sets equal to the enumerated boundaries. Exact
+version mode uses one global mismatch deny containing the sealed set of S3
+version IDs and one resource-set allow containing the selected object ARNs. Because S3 version
 IDs uniquely identify stored object versions, using an admitted ID against a
 different key does not return that key. The policy grants no IAM, STS, ACL,
 bucket-policy, or input-write action.
@@ -487,12 +553,17 @@ credentials can see):
   respects `is_workflow_required` (true by default when a config exists);
   `workflow=None` opts out explicitly and is refused when required; a named
   workflow must exist in the config.
-- Package `user_meta` is validated against the workflow's `metadata_schema`,
-  the entry list against its `entries_schema`, the commit `message` against
-  `is_message_required`, and the package name against `handle_pattern`.
-- Validation happens **before any write**; a refusal raises
-  `WorkflowContractError` and leaves nothing behind — a refusal transcript is
-  evidence.
+- The caller and handler metadata maps are merged with collision refusal;
+  that final package `user_meta` is validated against the workflow's
+  `metadata_schema`, the entry list against its `entries_schema`, the commit
+  `message` against `is_message_required`, and the package name against
+  `handle_pattern`.
+- Workflow validation happens first, then every caller-supplied
+  `PublicationInvariant` checks the same final metadata plus object bytes,
+  logical keys, message, and package name. Workflow refusal raises
+  `WorkflowContractError`; invariant findings are aggregated in
+  `DomainInvariantError`. Both leave nothing behind because they run before the
+  first write.
 - A conforming publication stamps `{id, config, schemas}` (S3 URIs with
   version IDs) into the manifest header exactly as quilt3 writes it, so
   catalogs and `quilt3` read the package as having passed the contract it
@@ -509,7 +580,7 @@ credentials can see):
   stricter than quilt3, in the refuse direction only.
 
 `run_scene` and `run_scene_from_genesis` expose these as `output_meta`,
-`output_message`, and `output_workflow`.
+`output_message`, `output_workflow`, and `output_invariants`.
 
 ### Policy-size behavior
 
@@ -732,18 +803,22 @@ run.
   `deploy` and `assume-policy --apply-to-*` require confirmation or `--yes`, and
   no verb can delete a stack, a role, or an object.
 - The publisher requires output bucket versioning before its first write and
-  requires every S3 write to return a non-null version ID. Concurrent writers
-  can create unreferenced object versions, but the winning `latest` manifest
-  continues to pin the exact data versions it published. Bucket Object Lock or
-  bucket-policy controls remain necessary to prevent unrelated principals from
-  replacing or deleting versions.
+  requires every S3 write to return a non-null version ID. Each invocation gets
+  a create-only revision pointer; `latest` is a final ETag compare-and-swap.
+  Concurrent writers can create unreferenced object versions, but both the CAS
+  winner and loser retain manifests that pin their exact data versions. The
+  loser returns `published-not-latest` rather than disguising a durable revision
+  as total failure. Bucket Object Lock or bucket-policy controls remain
+  necessary to prevent unrelated principals from replacing or deleting
+  versions.
 - The broad `.quilt/packages/*` output namespace is required because a new
   manifest's content hash is unknown before the worker builds it. Quilt3's
   content-addressed API contract derives that key from the manifest bytes;
   enforcing the contract against raw S3 callers belongs to a separate system
   boundary. The worker may read the exact pinned input manifest, output
-  workflow namespace, and exact output `latest` pointer needed by the consumer
-  and conflict-check paths. `ListBucket` remains denied. Quilt 8's public
+  workflow namespace, exact output `latest` pointer, and only its selected
+  revision pointer for consumer, CAS, and idempotency paths. Sibling revisions
+  and `ListBucket` remain denied. Quilt 8's public
   `Package.push()` performs an optional manifest listing after the write to
   render a short hash, so a no-list integration must suppress or replace that
   presentation step; do not grant broad listing merely for display.

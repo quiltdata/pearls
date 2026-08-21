@@ -14,7 +14,7 @@ from raja_sts.manifest import (
     parse_output_package,
     parse_output_selectors,
 )
-from raja_sts.models import PinnedManifestURI
+from raja_sts.models import OutputPackage, PinnedManifestURI
 
 
 @pytest.mark.parametrize(
@@ -72,6 +72,12 @@ def test_parse_output_package_derives_quilt_namespaces() -> None:
     assert output.read_resources == (
         "arn:aws:s3:::output-bucket/.quilt/workflows/*",
         "arn:aws:s3:::output-bucket/.quilt/named_packages/project/output/latest",
+    )
+    revision_output = OutputPackage("project/output", "output-bucket", revision_id="scene-123")
+    assert revision_output.read_resources == (
+        "arn:aws:s3:::output-bucket/.quilt/workflows/*",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/output/latest",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/output/scene-123",
     )
 
 

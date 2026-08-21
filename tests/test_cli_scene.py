@@ -98,6 +98,7 @@ def test_check_passes_and_reports_non_secret_authority() -> None:
     assert payload["genesis"]["top_hash"] == TOP_HASH
     assert payload["authority"]["mode"] == "per-object-version"
     assert payload["authority"]["bedrock_model_arn"] == MODEL_ARN
+    assert payload["authority"]["output_revision_id"] == payload["scene_id"]
     assert payload["handler"]["logical_key"] == "protocol/handler.py"
     assert payload["output"]["package_name"] == "proj/trial001-worker-output"
     assert payload["mutations_performed"] == []
@@ -349,13 +350,23 @@ def test_run_receipt_has_a_stable_versioned_shape_without_secrets() -> None:
     assert harness.run("--json", "--metadata", metadata, "--message", "Trial 001") == 0
 
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-run/v1"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-run/v2"
     assert payload["status"] == "published"
     assert payload["scene_id"].startswith("scene-2026")
     assert payload["genesis"]["uri"] == GENESIS_URI
     assert payload["handler"]["source_sha256"]
     assert payload["output"]["package_uri"].startswith("quilt+s3://output-bucket#package=")
-    assert payload["output"]["metadata_keys"] == ["pass_count", "reviewer_note"]
+    assert payload["output"]["revision_id"] == payload["scene_id"]
+    assert payload["output"]["revision_version_id"]
+    assert payload["output"]["is_latest"] is True
+    assert payload["output"]["reused_revision"] is False
+    assert payload["output"]["previous_top_hash"] is None
+    assert payload["output"]["latest_top_hash"] == payload["output"]["top_hash"]
+    assert payload["output"]["metadata_keys"] == [
+        "handler_metric",
+        "pass_count",
+        "reviewer_note",
+    ]
     assert payload["output"]["message_provided"] is True
     # The first clock tick names the Scene; the run brackets itself with the next two.
     assert payload["timestamps"] == {
@@ -368,6 +379,23 @@ def test_run_receipt_has_a_stable_versioned_shape_without_secrets() -> None:
     # Metadata values are declarations, not results: only their keys are echoed.
     assert "reviewer_note" in serialized
     assert "unique-metadata-value" not in serialized
+
+
+def test_latest_cas_loser_returns_successful_published_not_latest_receipt() -> None:
+    harness = SceneHarness()
+    harness.worker_s3.fail_latest = True
+
+    assert harness.run("--json") == 0
+
+    payload = harness.streams.json()
+    assert payload["status"] == "published-not-latest"
+    assert payload["output"]["is_latest"] is False
+    assert payload["output"]["latest_top_hash"] is None
+    assert payload["output"]["revision_version_id"]
+    assert any(
+        str(request["Key"]).endswith(f"/{payload['scene_id']}")
+        for request in harness.worker_s3.put_requests
+    )
 
 
 def test_run_sends_metadata_message_and_workflow_through_to_publication() -> None:

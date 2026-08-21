@@ -18,6 +18,8 @@ from raja_sts import (
     InvalidScopeError,
     ManifestLoadError,
     ManifestObject,
+    PublicationContext,
+    PublicationError,
     SceneContext,
     SceneHandlerResult,
     run_scene,
@@ -63,7 +65,8 @@ class FakeS3:
         self.body: Body | None = None
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
-        if str(kwargs.get("Key", "")).startswith(".quilt/workflows/"):
+        key = str(kwargs.get("Key", ""))
+        if key.startswith((".quilt/workflows/", ".quilt/named_packages/")):
             raise _NoWorkflowsConfig()
         self.events.append("get")
         self.get_requests.append(kwargs)
@@ -266,11 +269,12 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
         "project/scene-output/run/invocation.json",
         "project/scene-output/run/scene.json",
     ]
-    assert all("IfNoneMatch" not in request for request in s3.put_requests[:-1])
+    assert all("IfNoneMatch" not in request for request in s3.put_requests[:-2])
+    assert s3.put_requests[-2]["IfNoneMatch"] == "*"
     assert s3.put_requests[-1]["IfNoneMatch"] == "*"
     assert keys[-1] == ".quilt/named_packages/project/scene-output/latest"
     assert keys[-3].startswith(".quilt/packages/")
-    assert keys[-2] == ".quilt/named_packages/project/scene-output/1787140860"
+    assert keys[-2] == ".quilt/named_packages/project/scene-output/scene-3"
 
     by_key = {request["Key"]: request["Body"] for request in s3.put_requests}
     scene_record = json.loads(by_key["project/scene-output/run/scene.json"])
@@ -296,6 +300,9 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert "temporary-token" not in serialized_records
 
     assert result.top_hash == keys[-3].rsplit("/", 1)[-1]
+    assert result.publication.revision_id == "scene-3"
+    assert result.publication.status == "published"
+    assert result.publication.is_latest
     assert result.assumed_role_arn.endswith("/scene-3")
     assert result.package_uri.endswith(f"&top_hash={result.top_hash}")
     manifest = by_key[keys[-3]].decode().splitlines()
@@ -398,6 +405,22 @@ def test_runner_fails_closed_on_input_integrity(
             "JSON-serializable",
         ),
         (SceneHandlerResult({"result.txt": b"x"}, {"value": float("nan")}), "JSON-serializable"),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta=[]),  # type: ignore[arg-type]
+            "output metadata must be a mapping",
+        ),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta={"session_token": "x"}),
+            "output metadata contains credential",
+        ),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta={"temporary-token": "label"}),
+            "output metadata contains credential",
+        ),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta={"score": float("nan")}),
+            "output metadata must be JSON-serializable",
+        ),
     ],
 )
 def test_handler_contract_is_validated_before_publication(
@@ -629,10 +652,12 @@ def test_genesis_rejects_invalid_outputs_json(outputs: bytes) -> None:
         )
 
 
-def test_run_scene_threads_output_meta_message_into_manifest_header() -> None:
+def test_run_scene_merges_handler_output_meta_before_publication() -> None:
     result, _events, fake_s3, _sts, _session, _kwargs = _execute(
         handler=lambda inputs, session, context: SceneHandlerResult(
-            objects={"out.txt": b"ok"}, invocation={"model": "m"}
+            objects={"out.txt": b"ok"},
+            invocation={"model": "m"},
+            output_meta={"pass_count": 7},
         ),
         output_meta={"trial": 1, "limitations": "offline test"},
         output_message="threaded through",
@@ -643,9 +668,82 @@ def test_run_scene_threads_output_meta_message_into_manifest_header() -> None:
         if request["Key"] == f".quilt/packages/{result.top_hash}"
     )
     header = json.loads(manifest_put["Body"].decode().splitlines()[0])
-    assert header["user_meta"] == {"trial": 1, "limitations": "offline test"}
+    assert header["user_meta"] == {
+        "trial": 1,
+        "limitations": "offline test",
+        "pass_count": 7,
+    }
     assert header["message"] == "threaded through"
     assert "workflow" not in header
+    assert result.publication.metadata_keys == ("limitations", "pass_count", "trial")
+
+
+def test_handler_output_meta_collision_refuses_before_publication() -> None:
+    events: list[str] = []
+    s3 = FakeS3(events)
+
+    with pytest.raises(HandlerContractError, match="collides.*'trial'"):
+        _execute(
+            handler=lambda *_: SceneHandlerResult({"out.txt": b"ok"}, {}, output_meta={"trial": 2}),
+            s3=s3,
+            output_meta={"trial": 1},
+        )
+
+    assert not s3.put_requests
+
+
+@pytest.mark.parametrize(
+    "output_meta",
+    [
+        {"nested": "temporary-token"},
+        {"temporary-token": "label"},
+    ],
+)
+def test_caller_output_meta_is_secret_screened_before_publication(
+    output_meta: Mapping[str, Any],
+) -> None:
+    events: list[str] = []
+    s3 = FakeS3(events)
+
+    with pytest.raises(PublicationError, match="credential material"):
+        _execute(
+            handler=lambda *_: SceneHandlerResult({"out.txt": b"ok"}, {}),
+            s3=s3,
+            output_meta=output_meta,
+        )
+
+    assert not s3.put_requests
+
+
+class _CapturingInvariant:
+    identifier = "runner-final-material/v1"
+
+    def __init__(self) -> None:
+        self.contexts: list[PublicationContext] = []
+
+    def check(self, context: PublicationContext, /) -> Sequence[str]:
+        self.contexts.append(context)
+        return ()
+
+
+def test_output_invariant_sees_merged_metadata_and_runner_owned_records() -> None:
+    checker = _CapturingInvariant()
+
+    result, _events, _s3, _sts, _session, _kwargs = _execute(
+        handler=lambda *_: SceneHandlerResult({"out.txt": b"ok"}, {}, output_meta={"derived": 2}),
+        output_meta={"declared": 1},
+        output_invariants=(checker,),
+    )
+
+    assert result.publication.status == "published"
+    assert len(checker.contexts) == 1
+    context = checker.contexts[0]
+    assert context.user_meta == {"declared": 1, "derived": 2}
+    assert set(context.objects) == {
+        "out.txt",
+        "run/invocation.json",
+        "run/scene.json",
+    }
 
 
 PROFILE_ARN = (

@@ -62,11 +62,8 @@ def test_compile_maps_logical_scope_to_exact_versioned_resources(
     ]
     assert "Condition" not in version_read
     metadata_read = next(item for item in reads if item["Action"] == "s3:GetObject")
-    assert metadata_read["Resource"] == [
-        f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
-        "arn:aws:s3:::output-bucket/.quilt/workflows/*",
-        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
-    ]
+    # The exact NotResource deny below bounds this compact wildcard allow.
+    assert metadata_read["Resource"] == "*"
     wrong_version_denies = [
         item
         for item in statements
@@ -79,6 +76,40 @@ def test_compile_maps_logical_scope_to_exact_versioned_resources(
         "version-notes",
         "version-worker",
     ]
+
+
+def test_runner_revision_read_is_exact_and_deny_bounded(
+    manifest_loader, scope_spec: dict[str, object]
+) -> None:
+    result = compile(
+        MANIFEST_URI,
+        scope_spec,
+        manifest_loader=manifest_loader,
+        output_revision_id="scene-123",
+    )
+
+    assert result.output_package.revision_id == "scene-123"
+    assert result.report()["output_revision_id"] == "scene-123"
+    read_boundary = next(
+        statement
+        for statement in result.document["Statement"]
+        if statement.get("Effect") == "Deny" and statement.get("Action") == "s3:GetObject"
+    )
+    assert read_boundary["NotResource"] == [
+        f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
+        "arn:aws:s3:::output-bucket/.quilt/workflows/*",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/scene-123",
+    ]
+    assert not any(
+        resource.endswith("/project/scene-output/*") for resource in read_boundary["NotResource"]
+    )
+    current_allow = next(
+        statement
+        for statement in result.document["Statement"]
+        if statement.get("Effect") == "Allow" and statement.get("Action") == "s3:GetObject"
+    )
+    assert current_allow["Resource"] == "*"
 
 
 def test_five_object_scene_stays_exact_and_under_sts_limit(manifest_loader) -> None:
@@ -94,7 +125,7 @@ def test_five_object_scene_stays_exact_and_under_sts_limit(manifest_loader) -> N
 
     assert result.mode == "per-object-version"
     assert len(result.selected_objects) == 5
-    assert result.size == 1596
+    assert result.size == 1359
     version_denies = [
         statement
         for statement in result.document["Statement"]
