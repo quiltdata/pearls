@@ -23,6 +23,7 @@ from ..bedrock import (
     parse_bedrock_invocation_declaration,
 )
 from ..errors import InvalidScopeError, RajaStsError
+from ..genesis import RuntimeRequirementsReport
 from ..manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
 from ..models import ManifestObject, PinnedManifestURI
 from ..policy import DEFAULT_MAX_POLICY_CHARACTERS
@@ -67,15 +68,25 @@ UNPROVEN_CONDITIONS: tuple[str, ...] = (
     "fails closed at run time.",
     "The output registry's Quilt workflow contract is validated at publication "
     "with the Scene credential, not by this preflight.",
-    "Verifying the sealed handler's bytes proves code identity, not code safety. "
-    "This preflight does not execute them, so it also cannot prove the handler "
-    "imports cleanly or that its 'handler' binding is callable. During a run the "
-    "handler executes in-process as trusted code and receives the scoped session "
-    "that publication later uses.",
+    "Verifying the sealed handler proves code identity. Runtime preflight separately "
+    "checks declared distribution versions and top-level module resolution; it does "
+    "not prove that the named distribution supplied the resolved module. Neither "
+    "check executes dependency or handler module bodies, so declaration completeness, "
+    "import-time/native initialization, and callable binding remain unproven. During "
+    "a run the handler executes in-process as trusted code and receives the scoped "
+    "session that publication later uses.",
     "quilt3 manifest retrieval does not verify downloaded manifest bytes against "
     "the requested top hash (quiltdata/quilt#5181), so the genesis top hash is "
     "provenance, not tamper enforcement.",
 )
+
+
+def _requirements_summary(report: RuntimeRequirementsReport) -> str:
+    return (
+        f"Python {report.actual_python}; {report.applicable_count} applicable import(s) "
+        "passed independent distribution-version and module-resolution checks; "
+        f"{report.not_applicable_count} marker-skipped ({len(report.checks)} declared)"
+    )
 
 
 def _caching_loader(base: ManifestLoader | None) -> ManifestLoader:
@@ -350,12 +361,26 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
     record(
         "genesis-layout",
         _BOOTSTRAP,
-        "README.md, outputs.json, and at least one input/ entry are present",
+        "README.md, outputs.json, protocol/requirements.json, and at least one input/ "
+        "entry are present",
     )
     record(
         "genesis-controls-verified",
         _BOOTSTRAP,
-        "README.md and outputs.json read by exact S3 version and matched their Quilt hashes",
+        "README.md, outputs.json, and protocol/requirements.json were read by exact "
+        "S3 version and matched their Quilt hashes",
+    )
+    requirements = preflight.runtime_requirements
+    record(
+        "runtime-requirements-sealed",
+        _BOOTSTRAP,
+        f"{requirements.descriptor.logical_key} matched its Quilt hash "
+        f"(sha256 {requirements.source_sha256[:16]}...)",
+    )
+    record(
+        "runtime-requirements-compatible",
+        _LOCAL,
+        _requirements_summary(requirements.compatibility),
     )
     compilation = preflight.compilation
     record(
@@ -396,6 +421,7 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
             "model": invocation.report(),
             "duration_seconds": args.duration_seconds,
             "handler": sealed.report(),
+            "runtime_requirements": requirements.report(),
             "authority": compilation.report(),
             "output": {
                 "package_name": compilation.output_package.name,
@@ -420,6 +446,10 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
             ("scene id", scene_id),
             ("authority mode", compilation.mode),
             ("policy size", f"{compilation.size} characters"),
+            (
+                "runtime requirements",
+                _requirements_summary(requirements.compatibility),
+            ),
             (
                 "output package",
                 f"{compilation.output_package.name}@{compilation.output_package.bucket}",
@@ -448,12 +478,16 @@ def _receipt(
     result: SceneRunResult,
 ) -> dict[str, Any]:
     publication = result.publication
+    requirements = result.runtime_requirements
+    if requirements is None:
+        raise CliRefusal("Genesis Scene result omitted runtime-requirements preflight evidence")
     payload = envelope(SCENE_RUN_SCHEMA, publication.status)
     payload.update(
         {
             "scene_id": scene_id,
             "genesis": _genesis_document(genesis),
             "handler": sealed.report(),
+            "runtime_requirements": requirements.report(),
             "role_arn": args.role_arn,
             "model_arn": invocation.selected_model_id,
             "model": invocation.report(),
@@ -556,6 +590,9 @@ def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
         output_workflow=workflow,
     )
 
+    runtime_requirements = result.runtime_requirements
+    if runtime_requirements is None:
+        raise CliRefusal("Genesis Scene result omitted runtime-requirements preflight evidence")
     payload = _receipt(
         scene_id=scene_id,
         genesis=genesis,
@@ -572,6 +609,10 @@ def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
             ("scene id", scene_id),
             ("assumed role", result.assumed_role_arn),
             ("publication", result.publication.status),
+            (
+                "runtime requirements",
+                _requirements_summary(runtime_requirements.compatibility),
+            ),
             ("revision id", result.publication.revision_id),
             ("is latest", str(result.publication.is_latest).lower()),
             ("output top hash", result.top_hash),

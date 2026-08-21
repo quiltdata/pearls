@@ -12,6 +12,8 @@ from conftest import MANIFEST_URI
 
 import raja_sts.runner as runner_module
 from raja_sts import (
+    RUNTIME_REQUIREMENTS_MAX_BYTES,
+    RUNTIME_REQUIREMENTS_SCHEMA,
     AuthorityModeError,
     HandlerContractError,
     InputIntegrityError,
@@ -20,6 +22,7 @@ from raja_sts import (
     ManifestObject,
     PublicationContext,
     PublicationError,
+    RuntimeRequirementsError,
     SceneContext,
     SceneHandlerResult,
     run_scene,
@@ -30,6 +33,14 @@ from raja_sts.models import PinnedManifestURI
 MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution"
 CONTENT = b"Tell me hello."
+RUNTIME_REQUIREMENTS = json.dumps(
+    {
+        "$schema": RUNTIME_REQUIREMENTS_SCHEMA,
+        "python": ">=3.11",
+        "imports": [],
+    },
+    sort_keys=True,
+).encode()
 
 
 class _NoWorkflowsConfig(Exception):
@@ -300,6 +311,7 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert "temporary-token" not in serialized_records
 
     assert result.top_hash == keys[-3].rsplit("/", 1)[-1]
+    assert result.runtime_requirements is None
     assert result.publication.revision_id == "scene-3"
     assert result.publication.status == "published"
     assert result.publication.is_latest
@@ -456,11 +468,31 @@ class GenesisS3:
         self.events = events
         self.contents = contents
         self.requests: list[dict[str, Any]] = []
+        self.returned_versions: dict[str, str] = {}
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
-        self.events.append(f"control:{kwargs['Key']}")
+        key = str(kwargs["Key"])
+        self.events.append(f"control:{key}")
         self.requests.append(kwargs)
-        return {"Body": Body(self.contents[kwargs["Key"]]), "VersionId": kwargs["VersionId"]}
+        return {
+            "Body": Body(self.contents[key]),
+            "VersionId": self.returned_versions.get(key, str(kwargs["VersionId"])),
+        }
+
+
+def _runtime_requirements(
+    *,
+    python: str = ">=3.11",
+    imports: Sequence[Mapping[str, str]] = (),
+) -> bytes:
+    return json.dumps(
+        {
+            "$schema": RUNTIME_REQUIREMENTS_SCHEMA,
+            "python": python,
+            "imports": list(imports),
+        },
+        sort_keys=True,
+    ).encode()
 
 
 def _genesis_loader(
@@ -468,6 +500,8 @@ def _genesis_loader(
     *,
     readme: bytes = b"Follow the sealed instructions.",
     outputs: bytes | None = None,
+    requirements: bytes = RUNTIME_REQUIREMENTS,
+    corrupt_requirements: bool = False,
 ) -> tuple[Callable[[PinnedManifestURI], Sequence[ManifestObject]], GenesisS3]:
     outputs_content = (
         outputs
@@ -478,24 +512,38 @@ def _genesis_loader(
     contents = {
         "genesis/README.md": readme,
         "genesis/outputs.json": outputs_content,
+        "genesis/protocol/requirements.json": requirements,
     }
 
-    def item(logical_key: str, key: str, content: bytes) -> ManifestObject:
+    def item(
+        logical_key: str,
+        key: str,
+        content: bytes,
+        *,
+        declared_content: bytes | None = None,
+    ) -> ManifestObject:
         return ManifestObject(
             logical_key=logical_key,
             bucket="manifest-bucket",
             key=key,
             version_id=f"version-{logical_key}",
             hash_type="SHA256",
-            hash_value=hashlib.sha256(content).hexdigest(),
+            hash_value=hashlib.sha256(declared_content or content).hexdigest(),
         )
 
     def load(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
         events.append("genesis-load")
         assert manifest.original == MANIFEST_URI
+        declared_requirements = b"different bytes" if corrupt_requirements else None
         return (
             item("README.md", "genesis/README.md", readme),
             item("outputs.json", "genesis/outputs.json", outputs_content),
+            item(
+                "protocol/requirements.json",
+                "genesis/protocol/requirements.json",
+                requirements,
+                declared_content=declared_requirements,
+            ),
             ManifestObject(
                 logical_key="input/prompt.txt",
                 bucket="input-bucket",
@@ -554,12 +602,24 @@ def test_run_scene_from_genesis_derives_prompt_read_and_write_scope() -> None:
     result, events, worker_s3, sts, genesis_s3 = _execute_genesis(handler)
 
     assert events.count("genesis-load") == 1
-    assert events.index("genesis-load") < events.index("mint") < events.index("handler")
+    assert events.index("genesis-load") < events.index("control:genesis/README.md")
+    assert events.index("control:genesis/protocol/requirements.json") < events.index("mint")
+    assert events.index("mint") < events.index("handler")
     assert contexts[0].control_prompt == "Follow the sealed instructions."
     assert [request["Key"] for request in genesis_s3.requests] == [
         "genesis/README.md",
         "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
     ]
+    assert all(request["VersionId"] for request in genesis_s3.requests)
+    assert result.runtime_requirements is not None
+    assert result.runtime_requirements.descriptor.logical_key == "protocol/requirements.json"
+    assert (
+        result.runtime_requirements.source_sha256
+        == hashlib.sha256(RUNTIME_REQUIREMENTS).hexdigest()
+    )
+    assert result.runtime_requirements.source_size == len(RUNTIME_REQUIREMENTS)
+    assert result.runtime_requirements.compatibility.checks == ()
     assert worker_s3.get_requests == [
         {"Bucket": "input-bucket", "Key": "sealed/prompt.txt", "VersionId": "input-version"}
     ]
@@ -610,6 +670,11 @@ def test_genesis_write_scope_rejects_handler_output_before_publication() -> None
             (
                 ManifestObject("README.md", "bucket-name", "readme"),
                 ManifestObject("outputs.json", "bucket-name", "outputs"),
+                ManifestObject(
+                    "protocol/requirements.json",
+                    "bucket-name",
+                    "requirements",
+                ),
             ),
             "input/",
         ),
@@ -650,6 +715,82 @@ def test_genesis_rejects_invalid_outputs_json(outputs: bytes) -> None:
             manifest_loader=loader,
             genesis_s3_client=genesis_s3,
         )
+
+
+def test_incompatible_runtime_requirements_refuse_before_mint_or_execution() -> None:
+    events: list[str] = []
+    loader, genesis_s3 = _genesis_loader(
+        events,
+        requirements=_runtime_requirements(python="<0"),
+    )
+    worker_s3 = FakeS3(events)
+    sts = FakeSTS(events)
+    handler_calls: list[str] = []
+
+    with pytest.raises(RuntimeRequirementsError, match="Python"):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: handler_calls.append("handler"),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=loader,
+            genesis_s3_client=genesis_s3,
+            sts_client=sts,
+            session_factory=lambda **_: (_ for _ in ()).throw(
+                AssertionError("worker session must not be created")
+            ),
+        )
+
+    assert [request["Key"] for request in genesis_s3.requests] == [
+        "genesis/README.md",
+        "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
+    ]
+    assert sts.requests == []
+    assert worker_s3.get_requests == []
+    assert worker_s3.put_requests == []
+    assert handler_calls == []
+    assert "mint" not in events
+
+
+@pytest.mark.parametrize("failure", ["hash", "version", "size"])
+def test_runtime_requirements_are_read_by_exact_version_hash_and_size(
+    failure: str,
+) -> None:
+    events: list[str] = []
+    requirements = (
+        b" " * (RUNTIME_REQUIREMENTS_MAX_BYTES + 1) if failure == "size" else RUNTIME_REQUIREMENTS
+    )
+    loader, genesis_s3 = _genesis_loader(
+        events,
+        requirements=requirements,
+        corrupt_requirements=failure == "hash",
+    )
+    if failure == "version":
+        genesis_s3.returned_versions["genesis/protocol/requirements.json"] = "wrong-version"
+    sts = FakeSTS(events)
+
+    with pytest.raises(InputIntegrityError, match="hash mismatch|wrong version|exceeds"):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: SceneHandlerResult({"result/a": "x"}, {}),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=loader,
+            genesis_s3_client=genesis_s3,
+            sts_client=sts,
+        )
+
+    request = genesis_s3.requests[-1]
+    assert request == {
+        "Bucket": "manifest-bucket",
+        "Key": "genesis/protocol/requirements.json",
+        "VersionId": "version-protocol/requirements.json",
+    }
+    assert sts.requests == []
+    assert "mint" not in events
 
 
 def test_run_scene_merges_handler_output_meta_before_publication() -> None:

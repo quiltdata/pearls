@@ -43,8 +43,8 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 
 _SCHEMA_ROOT = "https://quiltdata.com/schemas/raja-sts"
-SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v1"
-SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v2"
+SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v2"
+SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v3"
 GENESIS_AUTHOR_SCHEMA = f"{_SCHEMA_ROOT}/cli-genesis-author/v1"
 INFRA_VALIDATE_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-validate/v2"
 INFRA_PLAN_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-plan/v2"

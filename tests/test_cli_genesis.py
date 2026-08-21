@@ -85,9 +85,9 @@ def test_dry_run_validates_everything_without_prompt_or_write(tmp_path: Path) ->
     assert payload["metadata_keys"] == ["owner"]
     assert payload["handler_key"] == "protocol/handler.py"
     assert payload["message_provided"] is True
-    assert [entry["logical_key"] for entry in payload["entries"]] == sorted(
-        entry["logical_key"] for entry in payload["entries"]
-    )
+    logical_keys = [entry["logical_key"] for entry in payload["entries"]]
+    assert logical_keys == sorted(logical_keys)
+    assert "protocol/requirements.json" in logical_keys
     assert harness.s3.put_requests == []
     assert harness.session.requested == ["s3"]
 

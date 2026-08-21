@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +10,7 @@ from authoring_support import (
     AUTHOR_DESTINATION,
     AUTHOR_MESSAGE,
     AUTHOR_METADATA,
+    RUNTIME_REQUIREMENTS_JSON,
     AuthoringS3,
     Stored,
     sha256,
@@ -16,6 +18,8 @@ from authoring_support import (
 )
 
 from raja_sts import (
+    RUNTIME_REQUIREMENTS_MAX_BYTES,
+    RUNTIME_REQUIREMENTS_SCHEMA,
     GenesisAuthoringError,
     HandlerContractError,
     InputIntegrityError,
@@ -23,6 +27,7 @@ from raja_sts import (
     ManifestLoadError,
     PublicationConflictError,
     PublicationError,
+    RuntimeRequirementsError,
     WorkflowContractError,
     format_manifest_uri,
     freeze_genesis_directory,
@@ -217,6 +222,23 @@ def test_local_freeze_rejects_unreadable_files_even_for_privileged_test_users(
             "URI-to-description object",
         ),
         (
+            lambda root: (root / "protocol" / "requirements.json").unlink(),
+            ManifestLoadError,
+            "protocol/requirements.json",
+        ),
+        (
+            lambda root: (root / "protocol" / "requirements.json").write_text("{}"),
+            RuntimeRequirementsError,
+            "missing required field",
+        ),
+        (
+            lambda root: (root / "protocol" / "requirements.json").write_bytes(
+                b" " * (RUNTIME_REQUIREMENTS_MAX_BYTES + 1)
+            ),
+            RuntimeRequirementsError,
+            "exceeds",
+        ),
+        (
             lambda root: (root / "protocol" / "handler.py").unlink(),
             ManifestLoadError,
             "protocol/handler.py",
@@ -232,7 +254,17 @@ def test_local_freeze_rejects_unreadable_files_even_for_privileged_test_users(
             "input/",
         ),
     ],
-    ids=["readme-missing", "readme-utf8", "outputs-object", "handler-missing", "handler", "input"],
+    ids=[
+        "readme-missing",
+        "readme-utf8",
+        "outputs-object",
+        "requirements-missing",
+        "requirements-malformed",
+        "requirements-oversized",
+        "handler-missing",
+        "handler",
+        "input",
+    ],
 )
 def test_preparation_validates_the_execution_genesis_layout(
     tmp_path: Path,
@@ -248,6 +280,32 @@ def test_preparation_validates_the_execution_genesis_layout(
     with pytest.raises(error_type, match=message):
         _prepare(tmp_path, s3)
 
+    assert s3.put_requests == []
+
+
+def test_authoring_validates_requirement_syntax_not_local_compatibility(
+    tmp_path: Path,
+) -> None:
+    write_valid_genesis(tmp_path)
+    declaration = {
+        "$schema": RUNTIME_REQUIREMENTS_SCHEMA,
+        "python": "<0",
+        "imports": [
+            {
+                "module": "definitely_not_installed_for_authoring",
+                "requirement": "definitely-not-installed-for-authoring==999",
+            }
+        ],
+    }
+    (tmp_path / "protocol" / "requirements.json").write_text(
+        json.dumps(declaration),
+        encoding="utf-8",
+    )
+    s3 = AuthoringS3()
+
+    plan = _prepare(tmp_path, s3)
+
+    assert plan.objects["protocol/requirements.json"] == json.dumps(declaration).encode()
     assert s3.put_requests == []
 
 
@@ -285,6 +343,7 @@ def test_preparation_accepts_and_records_a_custom_handler_key(tmp_path: Path) ->
     assert plan.handler_key == handler_key
     assert handler_key in plan.objects
     assert "protocol/handler.py" not in plan.objects
+    assert plan.objects["protocol/requirements.json"] == RUNTIME_REQUIREMENTS_JSON
     assert s3.put_requests == []
 
 

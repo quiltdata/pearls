@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -18,9 +19,14 @@ from .errors import (
     PublicationError,
 )
 from .genesis import (
+    RUNTIME_REQUIREMENTS_KEY,
+    RUNTIME_REQUIREMENTS_MAX_BYTES,
+    RuntimeRequirementsReport,
     decode_genesis_readme,
     parse_genesis_outputs,
+    parse_runtime_requirements,
     validate_genesis_layout_keys,
+    verify_runtime_requirements,
 )
 from .manifest import (
     ManifestLoader,
@@ -45,6 +51,34 @@ class MaterializedInput:
 
     descriptor: ManifestObject
     content: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRuntimeRequirements:
+    """Sealed control provenance and local compatibility checked before STS."""
+
+    descriptor: ManifestObject
+    source_sha256: str
+    source_size: int
+    compatibility: RuntimeRequirementsReport
+
+    def report(self) -> dict[str, Any]:
+        """Return exact control evidence plus bounded local compatibility results."""
+        return {
+            "control": {
+                "logical_key": self.descriptor.logical_key,
+                "bucket": self.descriptor.bucket,
+                "key": self.descriptor.key,
+                "version_id": self.descriptor.version_id,
+                "quilt_hash": {
+                    "type": self.descriptor.hash_type,
+                    "value": self.descriptor.hash_value,
+                },
+                "source_sha256": self.source_sha256,
+                "source_bytes": self.source_size,
+            },
+            "compatibility": self.compatibility.report(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +132,7 @@ class SceneRunResult:
     assumed_role_arn: str
     started_at: datetime
     completed_at: datetime
+    runtime_requirements: VerifiedRuntimeRequirements | None = None
 
     @property
     def top_hash(self) -> str:
@@ -266,6 +301,7 @@ def _execute_compiled_scene(
     session_factory: Callable[..., Any],
     clock: Callable[[], datetime],
     control_prompt: str | None = None,
+    runtime_requirements: VerifiedRuntimeRequirements | None = None,
     output_meta: Mapping[str, Any] | None = None,
     output_message: str | None = None,
     output_workflow: str | None | object = ...,
@@ -354,6 +390,7 @@ def _execute_compiled_scene(
         assumed_role_arn=credentials.assumed_role_arn,
         started_at=started_at,
         completed_at=completed_at,
+        runtime_requirements=runtime_requirements,
     )
 
 
@@ -431,6 +468,7 @@ class GenesisPreflight:
     by_logical_key: Mapping[str, ManifestObject]
     control_prompt: str
     writable: Mapping[str, object]
+    runtime_requirements: VerifiedRuntimeRequirements
     compilation: CompiledPolicy
 
 
@@ -448,11 +486,13 @@ def preflight_genesis(
     """Resolve, verify, and compile one pinned genesis package without minting.
 
     Performs only the reads the trusted bootstrap identity must perform: the
-    pinned manifest, then ``README.md`` and ``outputs.json`` by exact S3 version
-    with their Quilt content hashes verified. Calls no STS, invokes no model, and
-    writes nothing, so it is safe as a preflight. :func:`run_scene_from_genesis`
-    uses this same function, so a passing preflight and a run agree by
-    construction on layout, authority, and compiled policy.
+    pinned manifest, then ``README.md``, ``outputs.json``, and
+    ``protocol/requirements.json`` by exact S3 version with their Quilt content
+    hashes verified. Runtime compatibility is checked without importing module
+    bodies. Calls no STS, invokes no model, and writes nothing, so it is safe as
+    a preflight. :func:`run_scene_from_genesis` uses this same function, so a
+    passing preflight and a run agree by construction on controls, compatibility,
+    authority, and compiled policy.
     """
     genesis = parse_manifest_uri(genesis_uri)
     loader = manifest_loader or load_quilt_manifest
@@ -462,6 +502,18 @@ def preflight_genesis(
     control_prompt = decode_genesis_readme(prompt_bytes)
     writable, _selectors = parse_genesis_outputs(
         read_manifest_object(control_client, by_key["outputs.json"])
+    )
+    requirements_descriptor = by_key[RUNTIME_REQUIREMENTS_KEY]
+    requirements_source = read_manifest_object(
+        control_client,
+        requirements_descriptor,
+        max_bytes=RUNTIME_REQUIREMENTS_MAX_BYTES,
+    )
+    runtime_requirements = VerifiedRuntimeRequirements(
+        descriptor=requirements_descriptor,
+        source_sha256=hashlib.sha256(requirements_source).hexdigest(),
+        source_size=len(requirements_source),
+        compatibility=verify_runtime_requirements(parse_runtime_requirements(requirements_source)),
     )
     scope: dict[str, object] = {
         "readable": ["input/"],
@@ -486,6 +538,7 @@ def preflight_genesis(
         by_logical_key=by_key,
         control_prompt=control_prompt,
         writable=writable,
+        runtime_requirements=runtime_requirements,
         compilation=compilation,
     )
 
@@ -540,6 +593,7 @@ def run_scene_from_genesis(
         session_factory=session_factory,
         clock=clock,
         control_prompt=preflight.control_prompt,
+        runtime_requirements=preflight.runtime_requirements,
         output_meta=output_meta,
         output_message=output_message,
         output_workflow=output_workflow,

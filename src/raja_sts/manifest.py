@@ -343,12 +343,19 @@ def _calculate_hash(hash_type: str, content: bytes) -> str:
     return result
 
 
-def read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
-    """Read one manifest entry by exact S3 version and verify its Quilt hash."""
+def read_manifest_object(
+    s3_client: Any,
+    item: ManifestObject,
+    *,
+    max_bytes: int | None = None,
+) -> bytes:
+    """Read one exact S3 version, optionally bound its bytes, and verify its hash."""
     if item.version_id is None or item.hash_type is None or item.hash_value is None:
         raise AuthorityModeError(
             f"Selected input {item.logical_key!r} lacks a version ID or content hash"
         )
+    if max_bytes is not None and (not isinstance(max_bytes, int) or max_bytes < 0):
+        raise ValueError("max_bytes must be a nonnegative integer or None")
     try:
         response = s3_client.get_object(
             Bucket=item.bucket,
@@ -361,11 +368,15 @@ def read_manifest_object(s3_client: Any, item: ManifestObject) -> bytes:
             )
         body = response["Body"]
         try:
-            content = body.read()
+            content = body.read() if max_bytes is None else body.read(max_bytes + 1)
         finally:
             body.close()
         if not isinstance(content, bytes):
             raise TypeError("S3 body did not return bytes")
+        if max_bytes is not None and len(content) > max_bytes:
+            raise InputIntegrityError(
+                f"Selected input {item.logical_key!r} exceeds {max_bytes} bytes"
+            )
     except InputIntegrityError:
         raise
     except Exception as error:

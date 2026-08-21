@@ -46,12 +46,20 @@ ENTRIES_SCHEMA = json.dumps(
     {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "array",
-        "minItems": 4,
+        "minItems": 5,
         "items": {
             "type": "object",
             "required": ["logical_key", "size", "meta"],
         },
     }
+).encode()
+RUNTIME_REQUIREMENTS_JSON = json.dumps(
+    {
+        "$schema": ("https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1"),
+        "python": ">=3.11",
+        "imports": [],
+    },
+    sort_keys=True,
 ).encode()
 
 
@@ -206,6 +214,7 @@ def write_valid_genesis(
     handler_path.parent.mkdir(parents=True, exist_ok=True)
     (directory / "README.md").write_text("Run the sealed protocol.\n", encoding="utf-8")
     (directory / "outputs.json").write_bytes(OUTPUTS_JSON)
+    (directory / "protocol" / "requirements.json").write_bytes(RUNTIME_REQUIREMENTS_JSON)
     handler_path.write_bytes(HANDLER_SOURCE)
     (directory / "input" / "local.txt").write_bytes(b"local input")
 

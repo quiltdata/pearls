@@ -14,6 +14,7 @@ from cli_support import (
     PROFILE_MODEL_EAST_ARN,
     PROFILE_MODEL_WEST_ARN,
     ROLE_ARN,
+    RUNTIME_REQUIREMENTS_JSON,
     TOP_HASH,
     FakeBedrockControl,
     FakeGenesisS3,
@@ -27,7 +28,11 @@ from cli_support import (
     make_runtime,
 )
 
-from raja_sts import run_scene_from_genesis
+from raja_sts import (
+    RUNTIME_REQUIREMENTS_LIMITATIONS,
+    RUNTIME_REQUIREMENTS_SCHEMA,
+    run_scene_from_genesis,
+)
 from raja_sts.cli import main
 from raja_sts.cli.scene import UNPROVEN_CONDITIONS, generate_scene_id
 
@@ -39,6 +44,31 @@ BASE_ARGUMENTS = [
     "--model-arn",
     MODEL_ARN,
 ]
+
+
+def _runtime_requirements(
+    *,
+    python: str = ">=3.11",
+    imports: list[dict[str, str]] | None = None,
+) -> bytes:
+    declaration = json.loads(RUNTIME_REQUIREMENTS_JSON)
+    declaration["python"] = python
+    if imports is not None:
+        declaration["imports"] = imports
+    return json.dumps(declaration, sort_keys=True).encode()
+
+
+def _pathological_requirements(kind: str) -> bytes:
+    prefix = (
+        b'{"$schema":'
+        + json.dumps(RUNTIME_REQUIREMENTS_SCHEMA).encode()
+        + b',"python":">=3.11","imports":'
+    )
+    if kind == "nested":
+        return prefix + b"[" * 1_100 + b"]" * 1_100 + b"}"
+    if kind == "integer":
+        return prefix + b"1" * 5_000 + b"}"
+    raise AssertionError(f"unknown pathological requirements kind: {kind}")
 
 
 class SceneHarness:
@@ -93,13 +123,25 @@ def test_check_passes_and_reports_non_secret_authority() -> None:
 
     assert code == 0
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-check/v1"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-check/v2"
     assert payload["status"] == "ok"
     assert payload["genesis"]["top_hash"] == TOP_HASH
     assert payload["authority"]["mode"] == "per-object-version"
     assert payload["authority"]["bedrock_model_arn"] == MODEL_ARN
     assert payload["authority"]["output_revision_id"] == payload["scene_id"]
     assert payload["handler"]["logical_key"] == "protocol/handler.py"
+    requirements = payload["runtime_requirements"]
+    assert requirements["control"]["logical_key"] == "protocol/requirements.json"
+    assert requirements["control"]["version_id"] == "version-protocol/requirements.json"
+    assert requirements["control"]["source_bytes"] == len(RUNTIME_REQUIREMENTS_JSON)
+    assert requirements["compatibility"]["python"]["status"] == "compatible"
+    assert requirements["compatibility"]["summary"] == {
+        "declared": 0,
+        "applicable": 0,
+        "not_applicable": 0,
+    }
+    assert requirements["compatibility"]["imports"] == []
+    assert requirements["compatibility"]["limitations"] == list(RUNTIME_REQUIREMENTS_LIMITATIONS)
     assert payload["output"]["package_name"] == "proj/trial001-worker-output"
     assert payload["mutations_performed"] == []
     assert payload["unproven"] == list(UNPROVEN_CONDITIONS)
@@ -141,7 +183,8 @@ def test_check_reports_that_it_cannot_prove_the_handler_is_callable() -> None:
     assert harness.check("--json") == 0
 
     unproven = " ".join(harness.streams.json()["unproven"])
-    assert "does not execute them" in unproven
+    assert "Neither check executes dependency or handler module bodies" in unproven
+    assert "import-time/native initialization" in unproven
     assert "callable" in unproven
 
 
@@ -167,6 +210,7 @@ def test_check_reads_only_the_sealed_control_objects_by_exact_version() -> None:
     assert harness.genesis_s3.read_keys == [
         "genesis/README.md",
         "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
         "genesis/protocol/handler.py",
     ]
     assert all("VersionId" in request for request in harness.genesis_s3.get_requests)
@@ -187,6 +231,8 @@ def test_check_labels_which_checks_needed_the_trusted_bootstrap_identity() -> No
 
     by_name = {entry["name"]: entry["identity"] for entry in harness.streams.json()["checks"]}
     assert by_name["genesis-controls-verified"] == "trusted-bootstrap"
+    assert by_name["runtime-requirements-sealed"] == "trusted-bootstrap"
+    assert by_name["runtime-requirements-compatible"] == "local"
     assert by_name["sealed-handler-verified"] == "trusted-bootstrap"
     assert by_name["genesis-manifest-resolved"] == "trusted-bootstrap"
     assert by_name["argument-shapes"] == "local"
@@ -203,7 +249,9 @@ def test_check_states_what_it_cannot_prove_including_bedrock_model_access() -> N
     stdout = harness.streams.stdout
     assert "Bedrock account-level access" in stdout
     assert "quiltdata/quilt#5181" in stdout
-    assert "code identity, not code safety" in stdout
+    assert "separately checks declared distribution versions" in stdout
+    assert "does not prove that the named distribution supplied" in stdout
+    assert "declaration completeness" in stdout
     assert "No AssumeRole, model invocation, or write was performed" in stdout
     assert "no byte of the sealed handler was executed" in stdout
 
@@ -214,10 +262,123 @@ def test_check_human_output_summarizes_authority() -> None:
     assert harness.check() == 0
 
     stdout = harness.streams.stdout
+    assert "pass  runtime-requirements-sealed (trusted-bootstrap)" in stdout
+    assert "pass  runtime-requirements-compatible (local)" in stdout
     assert "pass  sealed-handler-verified (trusted-bootstrap)" in stdout
+    assert "runtime requirements" in stdout
     assert "authority mode" in stdout
     assert "per-object-version" in stdout
     assert "proj/trial001-worker-output@output-bucket" in stdout
+
+
+@pytest.mark.parametrize("verb", ["check", "run"])
+def test_receipts_distinguish_marker_skips_from_independent_probe_success(
+    verb: str,
+) -> None:
+    requirements = _runtime_requirements(
+        imports=[
+            {
+                "module": "platform_specific_dependency",
+                "requirement": (
+                    'platform-specific-distribution==1; sys_platform == "never-this-platform"'
+                ),
+            }
+        ]
+    )
+    harness = SceneHarness(GenesisFixture(requirements=requirements))
+
+    assert getattr(harness, verb)("--json") == 0
+
+    payload = harness.streams.json()
+    compatibility = payload["runtime_requirements"]["compatibility"]
+    assert compatibility["summary"] == {
+        "declared": 1,
+        "applicable": 0,
+        "not_applicable": 1,
+    }
+    check = compatibility["imports"][0]
+    assert check["applicability"] == "not-applicable"
+    assert check["distribution_version"] == {
+        "name": "platform-specific-distribution",
+        "specifier": "==1",
+        "installed": None,
+        "status": "not-checked",
+    }
+    assert check["module_resolution"] == {
+        "name": "platform_specific_dependency",
+        "status": "not-checked",
+    }
+    assert compatibility["limitations"] == list(RUNTIME_REQUIREMENTS_LIMITATIONS)
+    if verb == "check":
+        detail = next(
+            entry["detail"]
+            for entry in payload["checks"]
+            if entry["name"] == "runtime-requirements-compatible"
+        )
+        assert "0 applicable import(s)" in detail
+        assert "1 marker-skipped (1 declared)" in detail
+        assert "1 declared import(s) are compatible" not in detail
+
+
+def test_check_refuses_incompatible_requirements_without_spending_authority() -> None:
+    harness = SceneHarness(GenesisFixture(requirements=_runtime_requirements(python="<0")))
+
+    code = harness.check()
+
+    assert code == 1
+    assert "RuntimeRequirementsError" in harness.streams.stderr
+    assert "Python" in harness.streams.stderr
+    assert harness.genesis_s3.read_keys == [
+        "genesis/README.md",
+        "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
+    ]
+    assert harness.sts.requests == []
+    assert harness.events == []
+    assert harness.worker_s3.get_requests == []
+    assert harness.worker_s3.put_requests == []
+    assert harness.mutating_calls == []
+
+
+def test_check_hash_verifies_the_runtime_requirements_control() -> None:
+    harness = SceneHarness(GenesisFixture(corrupt_requirements=True))
+
+    code = harness.check()
+
+    assert code == 1
+    assert "InputIntegrityError" in harness.streams.stderr
+    assert "hash mismatch" in harness.streams.stderr
+    assert harness.sts.requests == []
+    assert harness.mutating_calls == []
+
+
+def test_check_requires_an_explicit_runtime_requirements_control() -> None:
+    harness = SceneHarness(GenesisFixture(requirements=None))
+
+    code = harness.check()
+
+    assert code == 1
+    assert "ManifestLoadError" in harness.streams.stderr
+    assert "protocol/requirements.json" in harness.streams.stderr
+    assert harness.genesis_s3.read_keys == []
+    assert harness.sts.requests == []
+
+
+@pytest.mark.parametrize("kind", ["nested", "integer"])
+def test_check_normalizes_pathological_requirements_json_to_a_typed_refusal(
+    kind: str,
+) -> None:
+    harness = SceneHarness(GenesisFixture(requirements=_pathological_requirements(kind)))
+
+    code = harness.check()
+
+    assert code == 1
+    assert "RuntimeRequirementsError" in harness.streams.stderr
+    assert "UTF-8 JSON object" in harness.streams.stderr
+    assert "Traceback" not in harness.streams.stderr
+    assert harness.sts.requests == []
+    assert harness.events == []
+    assert harness.mutating_calls == []
 
 
 @pytest.mark.parametrize(
@@ -340,6 +501,9 @@ def test_run_executes_one_scene_and_prints_the_immutable_package_uri() -> None:
         "quilt+s3://output-bucket#package=proj%2Ftrial001-worker-output&top_hash="
     )
     assert "assumed role" in stdout
+    assert "runtime requirements" in stdout
+    assert "0 applicable import(s)" in stdout
+    assert "0 marker-skipped (0 declared)" in stdout
 
 
 def test_run_receipt_has_a_stable_versioned_shape_without_secrets() -> None:
@@ -350,11 +514,24 @@ def test_run_receipt_has_a_stable_versioned_shape_without_secrets() -> None:
     assert harness.run("--json", "--metadata", metadata, "--message", "Trial 001") == 0
 
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-run/v2"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-run/v3"
     assert payload["status"] == "published"
     assert payload["scene_id"].startswith("scene-2026")
     assert payload["genesis"]["uri"] == GENESIS_URI
     assert payload["handler"]["source_sha256"]
+    requirements = payload["runtime_requirements"]
+    assert requirements["control"]["logical_key"] == "protocol/requirements.json"
+    assert requirements["control"]["version_id"] == "version-protocol/requirements.json"
+    assert requirements["control"]["source_sha256"]
+    assert requirements["control"]["source_bytes"] == len(RUNTIME_REQUIREMENTS_JSON)
+    assert requirements["compatibility"]["python"]["status"] == "compatible"
+    assert requirements["compatibility"]["summary"] == {
+        "declared": 0,
+        "applicable": 0,
+        "not_applicable": 0,
+    }
+    assert requirements["compatibility"]["imports"] == []
+    assert requirements["compatibility"]["limitations"] == list(RUNTIME_REQUIREMENTS_LIMITATIONS)
     assert payload["output"]["package_uri"].startswith("quilt+s3://output-bucket#package=")
     assert payload["output"]["revision_id"] == payload["scene_id"]
     assert payload["output"]["revision_version_id"]
@@ -545,6 +722,40 @@ def test_run_reports_a_refusal_from_the_runner_as_a_nonzero_exit() -> None:
     assert harness.streams.stdout == ""
 
 
+def test_run_refuses_incompatible_requirements_before_mint_or_sealed_execution(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "executed"
+    source = (
+        f"open({str(marker)!r}, 'w').close()\n\n\n"
+        "def handler(*_):\n"
+        "    raise AssertionError('handler must not execute')\n"
+    ).encode()
+    harness = SceneHarness(
+        GenesisFixture(
+            requirements=_runtime_requirements(python="<0"),
+            handler_source=source,
+        )
+    )
+
+    code = harness.run()
+
+    assert code == 1
+    assert "RuntimeRequirementsError" in harness.streams.stderr
+    assert not marker.exists()
+    assert harness.sts.requests == []
+    assert harness.events == []
+    assert harness.worker_s3.get_requests == []
+    assert harness.worker_s3.put_requests == []
+    assert "executing" not in harness.streams.stderr
+    assert harness.genesis_s3.read_keys == [
+        "genesis/protocol/handler.py",
+        "genesis/README.md",
+        "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
+    ]
+
+
 def test_run_validates_authority_and_mints_before_executing_sealed_bytes(
     tmp_path: Path,
 ) -> None:
@@ -663,6 +874,19 @@ def test_run_refuses_a_revision_with_no_sealed_handler_before_minting() -> None:
     assert "declares no sealed handler" in harness.streams.stderr
     assert harness.sts.requests == []
     assert harness.runner.calls == []
+
+
+def test_custom_handler_key_does_not_relocate_the_fixed_requirements_control() -> None:
+    harness = SceneHarness(GenesisFixture(handler_key="protocol/supervisor.py"))
+
+    assert harness.run("--handler-key", "protocol/supervisor.py", "--json") == 0
+
+    payload = harness.streams.json()
+    assert payload["handler"]["logical_key"] == "protocol/supervisor.py"
+    assert payload["runtime_requirements"]["control"]["logical_key"] == (
+        "protocol/requirements.json"
+    )
+    assert "genesis/protocol/requirements.json" in harness.genesis_s3.read_keys
 
 
 def _profile_arguments() -> list[str]:

@@ -33,9 +33,11 @@ from .errors import (
 from .genesis import (
     OUTPUTS_KEY,
     README_KEY,
+    RUNTIME_REQUIREMENTS_KEY,
     SEALED_HANDLER_KEY,
     decode_genesis_readme,
     parse_genesis_outputs,
+    parse_runtime_requirements,
     validate_genesis_layout_keys,
 )
 from .manifest import (
@@ -528,6 +530,7 @@ def _validate_frozen_layout(objects: Mapping[str, bytes], *, handler_key: str) -
     validate_genesis_layout_keys(objects, require_handler=False)
     decode_genesis_readme(objects[README_KEY])
     parse_genesis_outputs(objects[OUTPUTS_KEY])
+    parse_runtime_requirements(objects[RUNTIME_REQUIREMENTS_KEY])
     handler_source = objects.get(handler_key)
     if handler_source is None:
         raise ManifestLoadError(

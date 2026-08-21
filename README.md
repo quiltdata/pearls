@@ -346,10 +346,10 @@ over `SceneRunResult.publication.top_hash`.
 ### Boot from one genesis package
 
 `run_scene_from_genesis()` makes one pinned package the complete Scene brief.
-The package must contain a UTF-8 `README.md`, an `outputs.json` control object,
-and at least one entry below `input/`. The handler receives only the `input/`
-entries in its `inputs` mapping and reads the control prompt from
-`context.control_prompt`:
+The package must contain UTF-8 `README.md` and `outputs.json` controls, the fixed
+`protocol/requirements.json` runtime declaration, and at least one entry below
+`input/`. The handler receives only the `input/` entries in its `inputs` mapping
+and reads the control prompt from `context.control_prompt`:
 
 ```json
 {
@@ -364,6 +364,43 @@ and any other path grants one exact logical object. All entries must target one
 package and must not overlap. Exact-object and subtree selectors may not cover
 `run/scene.json` or `run/invocation.json`; those runner-owned keys are always
 rejected from returned handler objects, including under a whole-package grant.
+
+The requirements control uses one strict versioned shape:
+
+```json
+{
+  "$schema": "https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1",
+  "python": ">=3.11,<3.14",
+  "imports": [
+    {"module": "PIL", "requirement": "Pillow>=10,<11"},
+    {"module": "packaging", "requirement": "packaging==26.3; python_version >= '3.11'"}
+  ]
+}
+```
+
+`python` is a nonblank PEP 440 specifier. Each `imports` entry maps one unique
+top-level Python import identifier to a PEP 508 distribution requirement, so
+distribution and module names may differ, as with `Pillow` and `PIL`. Direct
+URLs and extras are refused because preflight installs nothing; environment
+markers are evaluated only in ordinary requirement context, and a context-only
+marker such as `extra` is a typed refusal rather than a silent omission. An
+explicit empty `imports` array is valid, but the control itself is mandatory.
+The v1 protocol bounds the UTF-8 source at 65,536 bytes and 128 imports;
+`python`, `module`, and `requirement` are limited to 256, 128, and 1,024
+characters respectively. Installed-version evidence is limited to 256
+characters, and a refusal reports at most 20 findings of 512 characters each
+with an omitted-count suffix. Authoring and runtime use the same limits, while
+the S3 reader stops after 65,537 bytes instead of buffering an oversized
+control.
+
+At execution preflight, the current Python version must match, every applicable
+distribution must be installed at a matching version, and each declared module
+must be resolvable. Resolution uses `find_spec()` rather than importing the
+module body. This proves neither that the named distribution supplied the
+resolved module nor that import-time Python/native initialization, transitive
+requirements, or the declaration's completeness will succeed. Pearls does not
+install or resolve dependencies, validate ABIs, lock the environment, sandbox
+code, or claim reproducibility.
 
 ```python
 from raja_sts import SceneHandlerResult, run_scene_from_genesis
@@ -392,14 +429,21 @@ deliberately supplied by the execution plane and recorded separately in the
 authority report; they are not derived from the sealed genesis package. A direct
 foundation model needs no explicit resource list. An inference profile requires
 the same complete exact closure shown above. The trusted bootstrap identity
-resolves the pinned manifest and reads the two control objects by exact version
-before minting the worker credential; their Quilt hashes are verified. Handlers
-run in-process as trusted execution code: they receive the scoped session that
-publication later uses, so selector and reserved-key checks constrain returned
-objects but are not a sandbox against a handler that makes direct S3 calls or
-retains the session. The lower-level
-`run_scene(manifest_uri, scope_spec, ...)` API remains available with the same
-revision, metadata, and invariant semantics.
+resolves the pinned manifest and reads `README.md`, `outputs.json`, and
+`protocol/requirements.json` by exact S3 version, verifies their Quilt hashes,
+and verifies local runtime compatibility before policy compilation or STS
+minting. `scene check`, `scene run`, and programmatic
+`run_scene_from_genesis()` share this preflight. Existing immutable Genesis
+packages without the requirements control fail closed and must be republished
+as a new pinned revision with an explicit declaration.
+
+Handlers run in-process as trusted execution code: they receive the scoped
+session that publication later uses, so selector and reserved-key checks
+constrain returned objects but are not a sandbox against a handler that makes
+direct S3 calls or retains the session. The lower-level
+`run_scene(manifest_uri, scope_spec, ...)` API remains available without a
+Genesis requirements declaration; its `SceneRunResult.runtime_requirements` is
+therefore `None`.
 
 ### Command line
 
@@ -427,12 +471,16 @@ immutable packages, `scene` operates with bounded short-lived authority, and
 #### Author a genesis package
 
 `pearls genesis author` freezes one local tree and publishes it with the
-operator's boto3 identity. A valid tree contains UTF-8 `README.md`, a UTF-8
-`outputs.json` object whose selectors are valid and non-overlapping, a selected
+operator's boto3 identity. A valid tree contains UTF-8 `README.md` and
+`outputs.json` controls, a strict UTF-8 `protocol/requirements.json`, a selected
 Python handler that parses and statically binds module-level `handler`, and at
-least one regular file below `input/`. The selected handler defaults to
+least one regular file below `input/`. Authoring validates the requirements
+schema and PEP 440/508 syntax but deliberately does not require the declared
+interpreter, distributions, or modules on the operator's machine; authoring and
+execution environments may differ. The selected handler defaults to
 `protocol/handler.py`; `--handler-key LOGICAL_KEY` chooses another safe relative
-logical key, which must also be supplied to later `pearls scene` commands.
+logical key, which must also be supplied to later `pearls scene` commands. The
+requirements key remains fixed when a custom handler key is selected.
 Traversal is recursive and sorted by relative POSIX logical key. Every regular
 file is read once into an immutable plan; symlinks, devices/FIFOs, unreadable
 files or directories, unsafe relative paths, and logical-key collisions are
@@ -485,9 +533,10 @@ telemetry, recomputes the Quilt top hash, then reads the selected object by its
 exact S3 `VersionId` and verifies its declared Quilt content hash. The bytes are
 copied into the new package; a foreign physical S3 reference is never retained.
 
-`--dry-run` performs the complete local layout, selected-handler,
-sealed-source, destination versioning, and workflow
-metadata/entries/message/handle validation. It performs zero writes, never
+`--dry-run` performs the complete local layout, requirements syntax,
+selected-handler, sealed-source, destination versioning, and workflow
+metadata/entries/message/handle validation. It does not test local runtime
+compatibility. It performs zero writes, never
 prompts, and reports a non-durable `planned_revision_id` that can be saved for a
 later real invocation. The durable revision ID, S3 version identities, top hash,
 and pinned URI remain null rather than being invented. A real publication
@@ -520,24 +569,26 @@ mid-publication failure remain operator responsibilities.
 
 A sealed-genesis Scene carries its executable protocol at
 `protocol/handler.py`, alongside the `README.md` control prompt, `outputs.json`
-write grant, and `input/` entries. `pearls scene` reads that entry from the
-requested pinned revision by exact S3 version and verifies its bytes against the
-Quilt content hash in the manifest before anything else happens to them.
+write grant, fixed `protocol/requirements.json`, and `input/` entries. `pearls
+scene` reads the handler and requirements from the requested pinned revision by
+exact S3 version and verifies their bytes against the Quilt content hashes in
+the manifest.
 
 Verifying and executing are deliberately separate steps, because a Python module
-body runs as soon as it is imported. `scene check` only verifies: it checks the
-hash and then checks *statically*, by parsing, that the bytes bind a module-level
-`handler`. It never imports them. `scene run` verifies the same way and then
-executes, but only when the runner calls the handler, which is after the genesis
-layout is checked, the session policy is compiled, the Scene credential is
-minted, and the verified inputs are materialized. Nothing in a genesis package
-runs until every one of those checks has passed.
+body runs as soon as it is imported. `scene check` verifies handler identity and
+binding statically and uses metadata plus `find_spec()` for applicable runtime
+requirements; it imports neither the handler nor a declared module body. `scene
+run` performs the same shared requirements preflight before `AssumeRole`, then
+executes the handler only after the policy is compiled, the Scene credential is
+minted, and verified inputs are materialized. Thus malformed or incompatible
+requirements spend no Scene authority and run no sealed code.
 
-`scene check` is therefore a genuinely read-only preflight. It validates every
-argument shape, resolves and hash-verifies the genesis controls and the sealed
-handler, compiles the session policy, and prints the non-secret authority report.
-It performs no `AssumeRole`, no model invocation, no write, and no execution of
-genesis code, so a nonzero exit always precedes all of those:
+`scene check` is therefore a read-only preflight. It validates every argument
+shape, resolves and hash-verifies the genesis controls and sealed handler,
+verifies local declared runtime compatibility, compiles the session policy, and
+prints the non-secret authority report. It performs no `AssumeRole`, no model
+invocation, no write, and no handler or dependency module-body execution, so a
+nonzero exit always precedes all of those:
 
 ```console
 pearls scene check \
@@ -565,9 +616,11 @@ Each reported check names the identity it needed. Checks labeled
 `trusted-bootstrap` used the operator's own read access, because the genesis
 controls must be read before a Scene credential can exist. The command also
 prints what it cannot prove: Bedrock account model access, the base role's own
-permissions, the output registry's workflow contract, the safety (as distinct
-from the identity) of the sealed handler, and — because it does not import the
-handler — whether the handler imports cleanly or is actually callable.
+permissions, the output registry's workflow contract, handler safety, whether
+the independently found module is supplied by the named distribution, or
+whether import-time/native initialization and undeclared transitive dependencies
+will succeed. Static handler binding also does not prove that the eventual value
+is callable.
 
 `scene run` executes one Scene. It calls `run_scene_from_genesis()` exactly once
 and adds no authority, materialization, workflow, or publication logic of its
@@ -588,13 +641,20 @@ pearls scene run \
 new execution needs a new ID and reuse is an explicit idempotency assertion.
 `--metadata` takes inline JSON or `@path`, and maps to the workflow-aware caller
 half of `output_meta`; `--message` and `--workflow` / `--no-workflow` map to
-`output_message` and `output_workflow`. The run receipt schema is v2 and contains
-only non-secret identity: Scene ID, genesis URI/top hash, verified handler
-provenance, assumed-role ARN, immutable package URI/top hash, revision and S3
-version identities, whether the revision was reused, `latest` disposition, and
-timestamps. Its top-level status is `published` or `published-not-latest`;
-either is exit 0 because the revision is durable. Metadata from both caller and
-handler is reported by key only. `scene check` cannot know handler-derived keys
+`output_message` and `output_workflow`. The `scene check` receipt schema is v2
+and the run receipt schema is v3. Both include exact requirements-control
+bucket/key/VersionId, Quilt hash, source SHA-256/size, the actual and required
+Python versions, and bounded per-import evidence. Each import records marker
+applicability, distribution-version status, and module-resolution status as
+separate fields; marker-skipped entries are `not-checked`, not “compatible.” A
+summary reports declared, applicable, and skipped counts, and both receipt types
+carry explicit limitations including the unproven distribution-to-module
+association. The run receipt otherwise contains only non-secret identity: Scene
+ID, genesis URI/top hash, verified handler provenance, assumed-role ARN, immutable package URI/top
+hash, revision and S3 version identities, whether the revision was reused,
+`latest` disposition, and timestamps. Its top-level status is `published` or
+`published-not-latest`; either is exit 0 because the revision is durable.
+Metadata from both caller and handler is reported by key only. `scene check` cannot know handler-derived keys
 because it never executes the handler, and the CLI does not dynamically load
 programmatic `output_invariants`. Diagnostics go to stderr so `--json` stdout
 stays parseable.
@@ -904,6 +964,11 @@ run.
   at all, so a preflight of an untrusted package executes none of it, but that
   makes `check` a safe inspection step rather than a safety guarantee about the
   subsequent run.
+- Runtime preflight checks the current Python version, installed distribution
+  metadata, and top-level module resolvability only. It does not install or
+  resolve packages, prove a distribution supplied the found module, execute
+  import-time/native initialization, validate undeclared transitive
+  dependencies, or establish a reproducible environment.
 - `pearls infra` verbs mutate persistent IAM with administrator authority and are
   kept in a separate group for that reason. `validate` and `plan` change nothing,
   `deploy` and `assume-policy --apply-to-*` require confirmation or `--yes`, and

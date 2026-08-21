@@ -94,6 +94,16 @@ def manifest_entry(logical_key: str, key: str, content: bytes) -> ManifestObject
     )
 
 
+RUNTIME_REQUIREMENTS_JSON = json.dumps(
+    {
+        "$schema": ("https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1"),
+        "python": ">=3.11",
+        "imports": [],
+    },
+    sort_keys=True,
+).encode()
+
+
 class GenesisFixture:
     """One pinned genesis revision: its manifest entries and its object bytes."""
 
@@ -102,8 +112,10 @@ class GenesisFixture:
         *,
         readme: bytes = README,
         outputs: bytes = OUTPUTS_JSON,
+        requirements: bytes | None = RUNTIME_REQUIREMENTS_JSON,
         handler_source: bytes | None = HANDLER_SOURCE,
         handler_key: str = "protocol/handler.py",
+        corrupt_requirements: bool = False,
         corrupt_handler: bool = False,
     ) -> None:
         self.handler_key = handler_key
@@ -115,6 +127,13 @@ class GenesisFixture:
         self.entries: list[ManifestObject] = [
             manifest_entry("README.md", "genesis/README.md", readme),
             manifest_entry("outputs.json", "genesis/outputs.json", outputs),
+        ]
+        if requirements is not None:
+            physical = "genesis/protocol/requirements.json"
+            self.contents[physical] = requirements
+            declared = b"different bytes" if corrupt_requirements else requirements
+            self.entries.append(manifest_entry("protocol/requirements.json", physical, declared))
+        self.entries.append(
             ManifestObject(
                 logical_key="input/prompt.txt",
                 bucket="genesis-bucket",
@@ -122,8 +141,8 @@ class GenesisFixture:
                 version_id="version-input/prompt.txt",
                 hash_type="SHA256",
                 hash_value=hashlib.sha256(INPUT_CONTENT).hexdigest(),
-            ),
-        ]
+            )
+        )
         if handler_source is not None:
             physical = f"genesis/{handler_key}"
             self.contents[physical] = handler_source

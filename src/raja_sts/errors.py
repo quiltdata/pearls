@@ -57,6 +57,10 @@ class GenesisAuthoringError(RajaStsError, ValueError):
     """A local genesis tree or authoring declaration is unsafe or ambiguous."""
 
 
+class RuntimeRequirementsError(RajaStsError, ValueError):
+    """A sealed runtime declaration is malformed or incompatible with this interpreter."""
+
+
 class PublicationError(RajaStsError):
     """The bounded output package could not be published."""
 
