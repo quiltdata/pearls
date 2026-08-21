@@ -322,8 +322,11 @@ def _prepare_publication_intent(
 
     if user_meta is not None and not isinstance(user_meta, Mapping):
         raise PublicationError("user_meta must be a mapping")
-    meta = dict(user_meta) if user_meta else {}
-    meta_json = _metadata_json(meta)
+    source_meta = dict(user_meta) if user_meta else {}
+    meta_json = _metadata_json(source_meta)
+    meta = json.loads(meta_json)
+    if not isinstance(meta, dict):  # The encoded top level is always a mapping.
+        raise TypeError("metadata JSON did not decode to an object")
     if message is not None and not isinstance(message, str):
         raise PublicationError("message must be a string")
     if isinstance(invariants, (str, bytes)) or not isinstance(invariants, Sequence):

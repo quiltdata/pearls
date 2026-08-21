@@ -1174,6 +1174,49 @@ def test_latest_conflict_reconciles_same_revision_as_published() -> None:
     assert publication.write_disposition == "package-writes"
 
 
+def test_metadata_snapshot_is_detached_from_invariant_owned_aliases() -> None:
+    s3 = RecordingS3()
+    caller_meta = {"nested": {"approved": False}, "values": ["original"]}
+
+    def mutate_caller_alias(context: PublicationContext) -> Sequence[str]:
+        nested = caller_meta["nested"]
+        values = caller_meta["values"]
+        assert isinstance(nested, dict)
+        assert isinstance(values, list)
+        nested["approved"] = True
+        values.append("changed")
+        assert context.user_meta == {
+            "nested": {"approved": False},
+            "values": ("original",),
+        }
+        return ()
+
+    checker = _Invariant("external-mutator/v1", mutate_caller_alias)
+    publication = _publish(s3, user_meta=caller_meta, invariants=(checker,))
+
+    manifest_request = next(
+        request
+        for request in s3.requests
+        if request["Key"] == f".quilt/packages/{publication.top_hash}"
+    )
+    header = json.loads(manifest_request["Body"].decode().splitlines()[0])
+    assert caller_meta == {"nested": {"approved": True}, "values": ["original", "changed"]}
+    assert header["user_meta"] == {
+        "nested": {"approved": False},
+        "values": ["original"],
+    }
+
+    retried = _publish(
+        s3,
+        user_meta={"nested": {"approved": False}, "values": ["original"]},
+        invariants=(checker,),
+    )
+
+    assert retried.reused_revision
+    assert retried.top_hash == publication.top_hash
+    assert retried.write_disposition == "none"
+
+
 def test_invariant_metadata_is_recursively_read_only_between_checkers() -> None:
     observations: list[tuple[bool, tuple[str, ...]]] = []
 
