@@ -21,6 +21,17 @@ TOP_HASH = "b" * 64
 GENESIS_URI = f"quilt+s3://genesis-bucket#package=proj%2Ftrial001-worker&top_hash={TOP_HASH}"
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution-haiku"
 MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+SECOND_MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+PROFILE_ARN = (
+    "arn:aws:bedrock:us-east-1:123456789012:"
+    "inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_EAST_ARN = (
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_WEST_ARN = (
+    "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
 ORCHESTRATOR_ARN = "arn:aws:iam::123456789012:user/orchestrator"
 BUCKET_PATTERN = "arn:aws:s3:::quilt-dev-*"
 INPUT_CONTENT = b"Assess the trial output against the rubric."
@@ -41,6 +52,7 @@ def handler(inputs, session, context):
     return SceneHandlerResult(
         {"result/answer.txt": context.control_prompt or ""},
         {"input_count": len(inputs)},
+        {"handler_metric": len(inputs)},
     )
 '''
 
@@ -82,6 +94,16 @@ def manifest_entry(logical_key: str, key: str, content: bytes) -> ManifestObject
     )
 
 
+RUNTIME_REQUIREMENTS_JSON = json.dumps(
+    {
+        "$schema": ("https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1"),
+        "python": ">=3.11",
+        "imports": [],
+    },
+    sort_keys=True,
+).encode()
+
+
 class GenesisFixture:
     """One pinned genesis revision: its manifest entries and its object bytes."""
 
@@ -90,8 +112,10 @@ class GenesisFixture:
         *,
         readme: bytes = README,
         outputs: bytes = OUTPUTS_JSON,
+        requirements: bytes | None = RUNTIME_REQUIREMENTS_JSON,
         handler_source: bytes | None = HANDLER_SOURCE,
         handler_key: str = "protocol/handler.py",
+        corrupt_requirements: bool = False,
         corrupt_handler: bool = False,
     ) -> None:
         self.handler_key = handler_key
@@ -103,6 +127,13 @@ class GenesisFixture:
         self.entries: list[ManifestObject] = [
             manifest_entry("README.md", "genesis/README.md", readme),
             manifest_entry("outputs.json", "genesis/outputs.json", outputs),
+        ]
+        if requirements is not None:
+            physical = "genesis/protocol/requirements.json"
+            self.contents[physical] = requirements
+            declared = b"different bytes" if corrupt_requirements else requirements
+            self.entries.append(manifest_entry("protocol/requirements.json", physical, declared))
+        self.entries.append(
             ManifestObject(
                 logical_key="input/prompt.txt",
                 bucket="genesis-bucket",
@@ -110,8 +141,8 @@ class GenesisFixture:
                 version_id="version-input/prompt.txt",
                 hash_type="SHA256",
                 hash_value=hashlib.sha256(INPUT_CONTENT).hexdigest(),
-            ),
-        ]
+            )
+        )
         if handler_source is not None:
             physical = f"genesis/{handler_key}"
             self.contents[physical] = handler_source
@@ -162,10 +193,11 @@ class FakeWorkerS3:
         self.events = events
         self.get_requests: list[dict[str, Any]] = []
         self.put_requests: list[dict[str, Any]] = []
+        self.fail_latest = False
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
         key = str(kwargs.get("Key", ""))
-        if key.startswith(".quilt/workflows/"):
+        if key.startswith((".quilt/workflows/", ".quilt/named_packages/")):
             raise MissingKey()
         self.events.append("worker-get")
         self.get_requests.append(kwargs)
@@ -178,6 +210,8 @@ class FakeWorkerS3:
     def put_object(self, **kwargs: Any) -> dict[str, str]:
         self.events.append(f"put:{kwargs['Key']}")
         self.put_requests.append(kwargs)
+        if self.fail_latest and str(kwargs["Key"]).endswith("/latest"):
+            raise MissingKey("PreconditionFailed")
         return {"VersionId": f"version-{len(self.put_requests)}"}
 
 
@@ -208,6 +242,26 @@ class FakeSTS:
             },
             "PackedPolicySize": 31,
         }
+
+
+class FakeBedrockControl:
+    """Read-only Bedrock control-plane profile resolver."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.response: dict[str, Any] = {
+            "inferenceProfileArn": PROFILE_ARN,
+            "status": "ACTIVE",
+            "type": "SYSTEM_DEFINED",
+            "models": [
+                {"modelArn": PROFILE_MODEL_EAST_ARN},
+                {"modelArn": PROFILE_MODEL_WEST_ARN},
+            ],
+        }
+
+    def get_inference_profile(self, **kwargs: Any) -> dict[str, Any]:
+        self.requests.append(kwargs)
+        return self.response
 
 
 class FakeSession:

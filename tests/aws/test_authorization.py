@@ -454,14 +454,14 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
         prompt = inputs[prompt_key].content.decode("utf-8")
         started_at = datetime.now(UTC).isoformat()
         response = session.client("bedrock-runtime").converse(
-            modelId=context.bedrock_model_arn,
+            modelId=context.bedrock_model_id,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
         )
         text = response["output"]["message"]["content"][0]["text"]
         return SceneHandlerResult(
             objects={"result/prompt.txt": prompt, "result/response.txt": text},
             invocation={
-                "model_id": response.get("modelId", context.bedrock_model_arn),
+                "model_id": response.get("modelId", context.bedrock_model_id),
                 "request_id": response["ResponseMetadata"].get("RequestId"),
                 "usage": response.get("usage"),
                 "stop_reason": response.get("stopReason"),
@@ -485,6 +485,9 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
             top_hash=result.top_hash,
         )
         assert package.top_hash == result.top_hash
+        assert result.publication.status == "published"
+        assert result.publication.is_latest
+        assert result.publication.revision_id == scene_id[:64]
         assert {key for key, _ in package.walk()} >= {
             "result/prompt.txt",
             "result/response.txt",
@@ -500,6 +503,9 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
                 "assumed_role_arn": result.assumed_role_arn,
                 "output_package": package_name,
                 "top_hash": result.top_hash,
+                "revision_id": result.publication.revision_id,
+                "publication_status": result.publication.status,
+                "is_latest": result.publication.is_latest,
             },
         )
 

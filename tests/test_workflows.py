@@ -207,6 +207,30 @@ def test_handle_pattern_mismatch_is_refused() -> None:
     assert stamp is not None and stamp["id"] == "patterned"
 
 
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "[",
+        "a{999999999999999999999999999999}",
+        "(" * 1000,
+    ],
+    ids=["syntax", "overflow", "recursion"],
+)
+def test_malformed_handle_pattern_is_a_sanitized_workflow_refusal(pattern: str) -> None:
+    config = CONFIG.replace(
+        'handle_pattern: "^trials/"',
+        f"handle_pattern: {json.dumps(pattern)}",
+    )
+
+    with pytest.raises(WorkflowContractError) as raised:
+        _resolve(_client(config.encode()), workflow="patterned")
+
+    message = str(raised.value)
+    assert message == "Workflow 'patterned' has invalid handle_pattern"
+    assert pattern not in message
+    assert "unterminated" not in message
+
+
 def test_ref_in_schema_is_refused() -> None:
     schema = json.dumps(
         {"type": "object", "properties": {"trial": {"$ref": "#/definitions/x"}}}

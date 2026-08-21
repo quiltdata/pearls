@@ -12,12 +12,17 @@ from conftest import MANIFEST_URI
 
 import raja_sts.runner as runner_module
 from raja_sts import (
+    RUNTIME_REQUIREMENTS_MAX_BYTES,
+    RUNTIME_REQUIREMENTS_SCHEMA,
     AuthorityModeError,
     HandlerContractError,
     InputIntegrityError,
     InvalidScopeError,
     ManifestLoadError,
     ManifestObject,
+    PublicationContext,
+    PublicationError,
+    RuntimeRequirementsError,
     SceneContext,
     SceneHandlerResult,
     run_scene,
@@ -28,6 +33,14 @@ from raja_sts.models import PinnedManifestURI
 MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution"
 CONTENT = b"Tell me hello."
+RUNTIME_REQUIREMENTS = json.dumps(
+    {
+        "$schema": RUNTIME_REQUIREMENTS_SCHEMA,
+        "python": ">=3.11",
+        "imports": [],
+    },
+    sort_keys=True,
+).encode()
 
 
 class _NoWorkflowsConfig(Exception):
@@ -63,7 +76,8 @@ class FakeS3:
         self.body: Body | None = None
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
-        if str(kwargs.get("Key", "")).startswith(".quilt/workflows/"):
+        key = str(kwargs.get("Key", ""))
+        if key.startswith((".quilt/workflows/", ".quilt/named_packages/")):
             raise _NoWorkflowsConfig()
         self.events.append("get")
         self.get_requests.append(kwargs)
@@ -266,11 +280,12 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
         "project/scene-output/run/invocation.json",
         "project/scene-output/run/scene.json",
     ]
-    assert all("IfNoneMatch" not in request for request in s3.put_requests[:-1])
+    assert all("IfNoneMatch" not in request for request in s3.put_requests[:-2])
+    assert s3.put_requests[-2]["IfNoneMatch"] == "*"
     assert s3.put_requests[-1]["IfNoneMatch"] == "*"
     assert keys[-1] == ".quilt/named_packages/project/scene-output/latest"
     assert keys[-3].startswith(".quilt/packages/")
-    assert keys[-2] == ".quilt/named_packages/project/scene-output/1787140860"
+    assert keys[-2] == ".quilt/named_packages/project/scene-output/scene-3"
 
     by_key = {request["Key"]: request["Body"] for request in s3.put_requests}
     scene_record = json.loads(by_key["project/scene-output/run/scene.json"])
@@ -296,6 +311,10 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert "temporary-token" not in serialized_records
 
     assert result.top_hash == keys[-3].rsplit("/", 1)[-1]
+    assert result.runtime_requirements is None
+    assert result.publication.revision_id == "scene-3"
+    assert result.publication.status == "published"
+    assert result.publication.is_latest
     assert result.assumed_role_arn.endswith("/scene-3")
     assert result.package_uri.endswith(f"&top_hash={result.top_hash}")
     manifest = by_key[keys[-3]].decode().splitlines()
@@ -398,6 +417,22 @@ def test_runner_fails_closed_on_input_integrity(
             "JSON-serializable",
         ),
         (SceneHandlerResult({"result.txt": b"x"}, {"value": float("nan")}), "JSON-serializable"),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta=[]),  # type: ignore[arg-type]
+            "output metadata must be a mapping",
+        ),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta={"session_token": "x"}),
+            "output metadata contains credential",
+        ),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta={"temporary-token": "label"}),
+            "output metadata contains credential",
+        ),
+        (
+            SceneHandlerResult({"result.txt": b"x"}, {}, output_meta={"score": float("nan")}),
+            "output metadata must be JSON-serializable",
+        ),
     ],
 )
 def test_handler_contract_is_validated_before_publication(
@@ -433,11 +468,31 @@ class GenesisS3:
         self.events = events
         self.contents = contents
         self.requests: list[dict[str, Any]] = []
+        self.returned_versions: dict[str, str] = {}
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
-        self.events.append(f"control:{kwargs['Key']}")
+        key = str(kwargs["Key"])
+        self.events.append(f"control:{key}")
         self.requests.append(kwargs)
-        return {"Body": Body(self.contents[kwargs["Key"]]), "VersionId": kwargs["VersionId"]}
+        return {
+            "Body": Body(self.contents[key]),
+            "VersionId": self.returned_versions.get(key, str(kwargs["VersionId"])),
+        }
+
+
+def _runtime_requirements(
+    *,
+    python: str = ">=3.11",
+    imports: Sequence[Mapping[str, str]] = (),
+) -> bytes:
+    return json.dumps(
+        {
+            "$schema": RUNTIME_REQUIREMENTS_SCHEMA,
+            "python": python,
+            "imports": list(imports),
+        },
+        sort_keys=True,
+    ).encode()
 
 
 def _genesis_loader(
@@ -445,6 +500,8 @@ def _genesis_loader(
     *,
     readme: bytes = b"Follow the sealed instructions.",
     outputs: bytes | None = None,
+    requirements: bytes = RUNTIME_REQUIREMENTS,
+    corrupt_requirements: bool = False,
 ) -> tuple[Callable[[PinnedManifestURI], Sequence[ManifestObject]], GenesisS3]:
     outputs_content = (
         outputs
@@ -455,24 +512,38 @@ def _genesis_loader(
     contents = {
         "genesis/README.md": readme,
         "genesis/outputs.json": outputs_content,
+        "genesis/protocol/requirements.json": requirements,
     }
 
-    def item(logical_key: str, key: str, content: bytes) -> ManifestObject:
+    def item(
+        logical_key: str,
+        key: str,
+        content: bytes,
+        *,
+        declared_content: bytes | None = None,
+    ) -> ManifestObject:
         return ManifestObject(
             logical_key=logical_key,
             bucket="manifest-bucket",
             key=key,
             version_id=f"version-{logical_key}",
             hash_type="SHA256",
-            hash_value=hashlib.sha256(content).hexdigest(),
+            hash_value=hashlib.sha256(declared_content or content).hexdigest(),
         )
 
     def load(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
         events.append("genesis-load")
         assert manifest.original == MANIFEST_URI
+        declared_requirements = b"different bytes" if corrupt_requirements else None
         return (
             item("README.md", "genesis/README.md", readme),
             item("outputs.json", "genesis/outputs.json", outputs_content),
+            item(
+                "protocol/requirements.json",
+                "genesis/protocol/requirements.json",
+                requirements,
+                declared_content=declared_requirements,
+            ),
             ManifestObject(
                 logical_key="input/prompt.txt",
                 bucket="input-bucket",
@@ -531,19 +602,43 @@ def test_run_scene_from_genesis_derives_prompt_read_and_write_scope() -> None:
     result, events, worker_s3, sts, genesis_s3 = _execute_genesis(handler)
 
     assert events.count("genesis-load") == 1
-    assert events.index("genesis-load") < events.index("mint") < events.index("handler")
+    assert events.index("genesis-load") < events.index("control:genesis/README.md")
+    assert events.index("control:genesis/protocol/requirements.json") < events.index("mint")
+    assert events.index("mint") < events.index("handler")
     assert contexts[0].control_prompt == "Follow the sealed instructions."
     assert [request["Key"] for request in genesis_s3.requests] == [
         "genesis/README.md",
         "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
     ]
+    assert all(request["VersionId"] for request in genesis_s3.requests)
+    assert result.runtime_requirements is not None
+    assert result.runtime_requirements.descriptor.logical_key == "protocol/requirements.json"
+    assert (
+        result.runtime_requirements.source_sha256
+        == hashlib.sha256(RUNTIME_REQUIREMENTS).hexdigest()
+    )
+    assert result.runtime_requirements.source_size == len(RUNTIME_REQUIREMENTS)
+    assert result.runtime_requirements.compatibility.checks == ()
     assert worker_s3.get_requests == [
         {"Bucket": "input-bucket", "Key": "sealed/prompt.txt", "VersionId": "input-version"}
     ]
     policy = json.loads(sts.requests[0]["Policy"])
-    write = policy["Statement"][-1]["Resource"]
-    assert "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write
-    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write
+    write_boundary = next(
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Effect") == "Deny" and statement.get("Action") == "s3:PutObject"
+    )
+    assert (
+        "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write_boundary["NotResource"]
+    )
+    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write_boundary["NotResource"]
+    write_allow = next(
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Effect") == "Allow" and statement.get("Action") == "s3:PutObject"
+    )
+    assert write_allow["Resource"] == "*"
     assert result.output_package.name == "project/scene-output"
 
 
@@ -575,6 +670,11 @@ def test_genesis_write_scope_rejects_handler_output_before_publication() -> None
             (
                 ManifestObject("README.md", "bucket-name", "readme"),
                 ManifestObject("outputs.json", "bucket-name", "outputs"),
+                ManifestObject(
+                    "protocol/requirements.json",
+                    "bucket-name",
+                    "requirements",
+                ),
             ),
             "input/",
         ),
@@ -617,10 +717,88 @@ def test_genesis_rejects_invalid_outputs_json(outputs: bytes) -> None:
         )
 
 
-def test_run_scene_threads_output_meta_message_into_manifest_header() -> None:
+def test_incompatible_runtime_requirements_refuse_before_mint_or_execution() -> None:
+    events: list[str] = []
+    loader, genesis_s3 = _genesis_loader(
+        events,
+        requirements=_runtime_requirements(python="<0"),
+    )
+    worker_s3 = FakeS3(events)
+    sts = FakeSTS(events)
+    handler_calls: list[str] = []
+
+    with pytest.raises(RuntimeRequirementsError, match="Python"):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: handler_calls.append("handler"),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=loader,
+            genesis_s3_client=genesis_s3,
+            sts_client=sts,
+            session_factory=lambda **_: (_ for _ in ()).throw(
+                AssertionError("worker session must not be created")
+            ),
+        )
+
+    assert [request["Key"] for request in genesis_s3.requests] == [
+        "genesis/README.md",
+        "genesis/outputs.json",
+        "genesis/protocol/requirements.json",
+    ]
+    assert sts.requests == []
+    assert worker_s3.get_requests == []
+    assert worker_s3.put_requests == []
+    assert handler_calls == []
+    assert "mint" not in events
+
+
+@pytest.mark.parametrize("failure", ["hash", "version", "size"])
+def test_runtime_requirements_are_read_by_exact_version_hash_and_size(
+    failure: str,
+) -> None:
+    events: list[str] = []
+    requirements = (
+        b" " * (RUNTIME_REQUIREMENTS_MAX_BYTES + 1) if failure == "size" else RUNTIME_REQUIREMENTS
+    )
+    loader, genesis_s3 = _genesis_loader(
+        events,
+        requirements=requirements,
+        corrupt_requirements=failure == "hash",
+    )
+    if failure == "version":
+        genesis_s3.returned_versions["genesis/protocol/requirements.json"] = "wrong-version"
+    sts = FakeSTS(events)
+
+    with pytest.raises(InputIntegrityError, match="hash mismatch|wrong version|exceeds"):
+        run_scene_from_genesis(
+            MANIFEST_URI,
+            role_arn=ROLE_ARN,
+            scene_id="scene-genesis",
+            handler=lambda *_: SceneHandlerResult({"result/a": "x"}, {}),
+            bedrock_model=MODEL_ARN,
+            manifest_loader=loader,
+            genesis_s3_client=genesis_s3,
+            sts_client=sts,
+        )
+
+    request = genesis_s3.requests[-1]
+    assert request == {
+        "Bucket": "manifest-bucket",
+        "Key": "genesis/protocol/requirements.json",
+        "VersionId": "version-protocol/requirements.json",
+    }
+    assert sts.requests == []
+    assert "mint" not in events
+
+
+def test_run_scene_merges_handler_output_meta_before_publication() -> None:
     result, _events, fake_s3, _sts, _session, _kwargs = _execute(
         handler=lambda inputs, session, context: SceneHandlerResult(
-            objects={"out.txt": b"ok"}, invocation={"model": "m"}
+            objects={"out.txt": b"ok"},
+            invocation={"model": "m"},
+            output_meta={"pass_count": 7},
         ),
         output_meta={"trial": 1, "limitations": "offline test"},
         output_message="threaded through",
@@ -631,6 +809,167 @@ def test_run_scene_threads_output_meta_message_into_manifest_header() -> None:
         if request["Key"] == f".quilt/packages/{result.top_hash}"
     )
     header = json.loads(manifest_put["Body"].decode().splitlines()[0])
-    assert header["user_meta"] == {"trial": 1, "limitations": "offline test"}
+    assert header["user_meta"] == {
+        "trial": 1,
+        "limitations": "offline test",
+        "pass_count": 7,
+    }
     assert header["message"] == "threaded through"
     assert "workflow" not in header
+    assert result.publication.metadata_keys == ("limitations", "pass_count", "trial")
+
+
+def test_handler_output_meta_collision_refuses_before_publication() -> None:
+    events: list[str] = []
+    s3 = FakeS3(events)
+
+    with pytest.raises(HandlerContractError, match="collides.*'trial'"):
+        _execute(
+            handler=lambda *_: SceneHandlerResult({"out.txt": b"ok"}, {}, output_meta={"trial": 2}),
+            s3=s3,
+            output_meta={"trial": 1},
+        )
+
+    assert not s3.put_requests
+
+
+@pytest.mark.parametrize(
+    "output_meta",
+    [
+        {"nested": "temporary-token"},
+        {"temporary-token": "label"},
+    ],
+)
+def test_caller_output_meta_is_secret_screened_before_publication(
+    output_meta: Mapping[str, Any],
+) -> None:
+    events: list[str] = []
+    s3 = FakeS3(events)
+
+    with pytest.raises(PublicationError, match="credential material"):
+        _execute(
+            handler=lambda *_: SceneHandlerResult({"out.txt": b"ok"}, {}),
+            s3=s3,
+            output_meta=output_meta,
+        )
+
+    assert not s3.put_requests
+
+
+class _CapturingInvariant:
+    identifier = "runner-final-material/v1"
+
+    def __init__(self) -> None:
+        self.contexts: list[PublicationContext] = []
+
+    def check(self, context: PublicationContext, /) -> Sequence[str]:
+        self.contexts.append(context)
+        return ()
+
+
+def test_output_invariant_sees_merged_metadata_and_runner_owned_records() -> None:
+    checker = _CapturingInvariant()
+
+    result, _events, _s3, _sts, _session, _kwargs = _execute(
+        handler=lambda *_: SceneHandlerResult({"out.txt": b"ok"}, {}, output_meta={"derived": 2}),
+        output_meta={"declared": 1},
+        output_invariants=(checker,),
+    )
+
+    assert result.publication.status == "published"
+    assert len(checker.contexts) == 1
+    context = checker.contexts[0]
+    assert context.user_meta == {"declared": 1, "derived": 2}
+    assert set(context.objects) == {
+        "out.txt",
+        "run/invocation.json",
+        "run/scene.json",
+    }
+
+
+PROFILE_ARN = (
+    "arn:aws:bedrock:us-east-1:123456789012:"
+    "inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_EAST = (
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_WEST = (
+    "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+
+
+def test_run_scene_uses_selected_profile_for_model_id_region_and_report() -> None:
+    contexts: list[SceneContext] = []
+
+    def handler(
+        inputs: Mapping[str, Any], session: FakeSession, context: SceneContext
+    ) -> SceneHandlerResult:
+        contexts.append(context)
+        session.client("bedrock-runtime").converse(
+            modelId=context.bedrock_model_id,
+            messages=[],
+        )
+        return SceneHandlerResult({"result.txt": "ok"}, {"model": context.bedrock_model_id})
+
+    scope = _scope(model=PROFILE_ARN)
+    scope["bedrock_invoke_resources"] = [
+        PROFILE_MODEL_WEST,
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST,
+    ]
+    _result, _events, s3, sts, session, session_kwargs = _execute(
+        handler=handler,
+        scope=scope,
+        bedrock_profile_loader=lambda arn: (
+            (
+                PROFILE_MODEL_EAST,
+                PROFILE_MODEL_WEST,
+            )
+            if arn == PROFILE_ARN
+            else ()
+        ),
+    )
+
+    assert session_kwargs["region_name"] == "us-east-1"
+    assert session.bedrock.requests[0]["modelId"] == PROFILE_ARN
+    assert contexts[0].bedrock_model_id == PROFILE_ARN
+    assert contexts[0].bedrock_model_arn == PROFILE_ARN
+    assert contexts[0].bedrock_invoke_resources == (
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST,
+        PROFILE_MODEL_WEST,
+    )
+    policy = json.loads(sts.requests[0]["Policy"])
+    model_statements = [
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Action") == "bedrock:InvokeModel"
+    ]
+    assert model_statements == [
+        {
+            "Action": "bedrock:InvokeModel",
+            "Effect": "Allow",
+            "Resource": PROFILE_ARN,
+        },
+        {
+            "Action": "bedrock:InvokeModel",
+            "Condition": {
+                "StringLike": {
+                    "bedrock:InferenceProfileArn": PROFILE_ARN,
+                }
+            },
+            "Effect": "Allow",
+            "Resource": [PROFILE_MODEL_EAST, PROFILE_MODEL_WEST],
+        },
+    ]
+    scene_put = next(
+        request for request in s3.put_requests if request["Key"].endswith("run/scene.json")
+    )
+    authority = json.loads(scene_put["Body"])["authority"]
+    assert authority["bedrock"]["selected_model_id"] == PROFILE_ARN
+    assert authority["bedrock"]["invoke_resources"] == [
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST,
+        PROFILE_MODEL_WEST,
+    ]

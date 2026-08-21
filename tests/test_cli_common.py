@@ -35,7 +35,7 @@ def _runtime(streams: Streams, answers: tuple[str, ...] = ()) -> Runtime:
     return make_runtime(streams=streams, session=object(), answers=answers)
 
 
-def test_root_help_documents_both_groups_and_the_shared_conventions(
+def test_root_help_documents_all_groups_and_the_shared_conventions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     streams = Streams()
@@ -44,10 +44,11 @@ def test_root_help_documents_both_groups_and_the_shared_conventions(
 
     assert code == EXIT_OK
     help_text = capsys.readouterr().out
+    assert "genesis author DIRECTORY" in help_text
     assert "scene   check | run" in help_text
     assert "infra   validate | plan | deploy | status | assume-policy" in help_text
     assert "--json emits a stable, versioned document" in help_text
-    assert "never prompt" in help_text
+    assert "--dry-run operations never prompt" in help_text
 
 
 def test_version_reports_the_package_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -229,7 +230,7 @@ def test_packaged_template_declares_the_role_arn_output() -> None:
     assert set(template.parameters) == {
         "OrchestratorPrincipalArn",
         "ProjectBucketArnPattern",
-        "BedrockModelArn",
+        "BedrockInvokeModelArns",
         "RoleName",
         "MaxSessionDuration",
     }

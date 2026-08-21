@@ -9,23 +9,25 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from .. import __version__
 from ..errors import RajaStsError
-from . import infra, scene
+from . import genesis, infra, scene
 from ._common import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, Runtime
 
 _DESCRIPTION = """\
-Operator commands for one sealed-genesis Scene run.
+Operator commands for immutable genesis packages, bounded Scenes, and IAM.
 
-  scene   check | run                                  bounded Scene authority
+  genesis author DIRECTORY                              operator package authority
+  scene   check | run                                   bounded Scene authority
   infra   validate | plan | deploy | status | assume-policy   administrator IAM
 
-Read-only verbs never prompt. Mutating verbs require confirmation or --yes.
-Human-readable output goes to stdout; --json emits a stable, versioned document.
-Diagnostics go to stderr. No command prints credentials or bearer tokens.
+Read-only and --dry-run operations never prompt. Mutating operator/admin verbs
+require confirmation or --yes. Human-readable output goes to stdout;
+--json emits a stable, versioned document. Diagnostics go to stderr. No command
+prints credentials or bearer tokens.
 """
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Return the root ``pearls`` parser with both command groups registered."""
+    """Return the root ``pearls`` parser with all command groups registered."""
     parser = argparse.ArgumentParser(
         prog="pearls",
         description=_DESCRIPTION,
@@ -33,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"pearls {__version__}")
     groups = parser.add_subparsers(dest="group", metavar="GROUP", required=True)
+    genesis.add_parser(groups)
     scene.add_parser(groups)
     infra.add_parser(groups)
     return parser

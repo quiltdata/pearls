@@ -135,7 +135,24 @@ class _SchemaValidator:
         try:
             self._validator.validate(instance)
         except jsonschema.ValidationError as error:
-            raise WorkflowContractError(f"{subject} failed validation: {error.message}") from error
+            detail = f"{error.validator!r} constraint was not satisfied"
+            required = error.validator_value
+            if (
+                error.validator == "required"
+                and isinstance(required, Sequence)
+                and not isinstance(required, (str, bytes))
+                and isinstance(error.instance, Mapping)
+            ):
+                missing = [
+                    field
+                    for field in required
+                    if isinstance(field, str) and field not in error.instance
+                ]
+                if missing:
+                    detail = "required properties are missing: " + ", ".join(
+                        ascii(field) for field in missing
+                    )
+            raise WorkflowContractError(f"{subject} failed validation: {detail}") from error
 
 
 def _load_schema(
@@ -242,7 +259,13 @@ def resolve_workflow_stamp(
     if pattern is not None:
         if not isinstance(pattern, str):
             raise WorkflowContractError(f"Workflow {resolved!r} handle_pattern must be a string")
-        if not re.search(pattern, package_name):
+        try:
+            matches = re.search(pattern, package_name)
+        except (re.error, OverflowError, RecursionError) as error:
+            raise WorkflowContractError(
+                f"Workflow {resolved!r} has invalid handle_pattern"
+            ) from error
+        if not matches:
             raise WorkflowContractError("Package name doesn't match required pattern.")
 
     if workflow_data.get("is_message_required", False) and not message:

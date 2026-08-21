@@ -16,7 +16,11 @@ import secrets
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from ..policy import bedrock_model_region
+from ..bedrock import (
+    bedrock_inventory_region_mismatches,
+    parse_bedrock_inventory,
+    parse_bedrock_resource,
+)
 from ._common import (
     EXIT_OK,
     INFRA_ASSUME_POLICY_SCHEMA,
@@ -63,14 +67,14 @@ _STACK_FAILED = frozenset(
 _PARAMETER_ARGUMENTS: tuple[tuple[str, str], ...] = (
     ("OrchestratorPrincipalArn", "orchestrator_principal_arn"),
     ("ProjectBucketArnPattern", "project_bucket_arn_pattern"),
-    ("BedrockModelArn", "bedrock_model_arn"),
     ("RoleName", "role_name"),
     ("MaxSessionDuration", "max_session_duration"),
 )
+_BEDROCK_INVENTORY_PARAMETER = "BedrockInvokeModelArns"
 
 BEDROCK_ACCESS_NOTE = (
-    "Bedrock account-level access to the model cannot be provisioned by this "
-    "template; grant it in the Bedrock console. This role alone is not sufficient."
+    "Bedrock account-level access to admitted models and profiles cannot be provisioned "
+    "by this template; grant it in the Bedrock console. This role alone is not sufficient."
 )
 EXTERNAL_ID_NOTE = (
     "The trust policy admits the orchestrator principal with no sts:ExternalId "
@@ -84,9 +88,9 @@ REVIEW_SHELL_NOTE = (
     "explicit administrator action."
 )
 INTERSECTION_NOTE = (
-    "Effective Scene authority is the intersection of this base role and the "
-    "sealed session policy, so BedrockModelArn must equal the model ARN the Scene "
-    "scope selects or the run fails closed."
+    "The base role's Bedrock ARN list is an inventory, not per-Scene authority. "
+    "Effective authority is its intersection with the sealed session policy, which "
+    "selects exactly one model or profile and its exact supporting resources."
 )
 TEMPLATE_NOTES: tuple[str, ...] = (
     BEDROCK_ACCESS_NOTE,
@@ -133,9 +137,14 @@ def _add_parameter_arguments(parser: argparse.ArgumentParser, *, required: bool)
     )
     parser.add_argument(
         "--bedrock-model-arn",
+        action="append",
         required=required,
         metavar="ARN",
-        help="exact Bedrock foundation-model ARN this role admits",
+        help=(
+            "exact Bedrock regional foundation-model, account-scoped inference-profile, "
+            "or global-profile regionless support ARN; repeat to build the role "
+            "inventory, including every profile support resource"
+        ),
     )
     parser.add_argument(
         "--role-name",
@@ -256,9 +265,9 @@ def add_parser(subparsers: Any) -> None:
         "assume-policy",
         help="print the orchestrator's sts:AssumeRole policy for deployed roles",
         description=(
-            "One role admits exactly one model, so a multi-model project needs one "
-            "role per model and an orchestrator policy naming each. This prints that "
-            "policy; applying it requires an explicit flag and confirmation."
+            "Print an orchestrator policy naming one or more Scene execution roles. "
+            "A role can hold a model inventory while each Scene session still selects "
+            "exactly one model or profile; applying requires confirmation."
         ),
     )
     assume.add_argument(
@@ -266,7 +275,7 @@ def add_parser(subparsers: Any) -> None:
         action="append",
         default=[],
         metavar="ARN",
-        help="Scene execution role ARN; repeat for each model",
+        help="Scene execution role ARN; repeat for each role",
     )
     assume.add_argument(
         "--from-stack",
@@ -299,6 +308,10 @@ def _supplied_parameters(args: argparse.Namespace) -> dict[str, str]:
         value = getattr(args, attribute, None)
         if value is not None:
             values[name] = str(value)
+    model_arns = getattr(args, "bedrock_model_arn", None)
+    if model_arns is not None:
+        inventory = parse_bedrock_inventory(tuple(str(value) for value in model_arns))
+        values[_BEDROCK_INVENTORY_PARAMETER] = ",".join(inventory)
     return values
 
 
@@ -310,23 +323,35 @@ def _resolve_region(runtime: Runtime, args: argparse.Namespace) -> str | None:
 
 
 def _check_model_region(parameters: Mapping[str, str], region: str | None) -> str:
-    """Reject a model ARN whose region differs from the deployment region."""
-    model_arn = parameters.get("BedrockModelArn")
-    if model_arn is None:
-        return "BedrockModelArn was not supplied, so no region comparison was made"
-    model_region = bedrock_model_region(model_arn)
+    """Validate every inventory ARN against the deployment-region convention."""
+    serialized = parameters.get(_BEDROCK_INVENTORY_PARAMETER)
+    if serialized is None:
+        return f"{_BEDROCK_INVENTORY_PARAMETER} was not supplied, so no region comparison was made"
+    inventory = parse_bedrock_inventory(tuple(serialized.split(",")))
+    resource_regions = sorted(
+        {parse_bedrock_resource(resource).region or "<global>" for resource in inventory}
+    )
     if region is None:
         return (
-            f"model region {model_region} could not be compared: no --region and no "
-            "region in the resolved AWS profile"
+            f"inventory regions {', '.join(resource_regions)} could not be compared: "
+            "no --region and no region in the resolved AWS profile"
         )
-    if model_region != region:
+    mismatches = bedrock_inventory_region_mismatches(inventory, region)
+    if mismatches:
         raise CliRefusal(
-            f"BedrockModelArn is in {model_region} but the deployment region is {region}. "
-            "A role in one region cannot invoke a model ARN in another, and the "
-            "mismatch would only surface as a fail-closed Scene run."
+            f"{_BEDROCK_INVENTORY_PARAMETER} contains resource(s) incompatible with "
+            f"deployment region {region}: {', '.join(mismatches)}. A cross-region or "
+            "regionless foundation model is accepted only as an exact support resource "
+            "for an admitted inference profile in the deployment region; otherwise the "
+            "Scene would fail closed."
         )
-    return f"model region {model_region} matches the deployment region"
+    routed = [
+        resource for resource in inventory if parse_bedrock_resource(resource).region != region
+    ]
+    detail = f"all {len(inventory)} inventory resource(s) match deployment region {region}"
+    if routed:
+        detail += f" or are {len(routed)} exact cross-region profile support resource(s)"
+    return detail
 
 
 def _effective_parameters(template: RoleTemplate, supplied: Mapping[str, str]) -> dict[str, str]:
@@ -338,6 +363,23 @@ def _effective_parameters(template: RoleTemplate, supplied: Mapping[str, str]) -
     }
     effective.update(supplied)
     return effective
+
+
+def _display_parameters(
+    template: RoleTemplate, parameters: Mapping[str, str]
+) -> dict[str, str | list[str]]:
+    """Return parameter values with list types exposed instead of serialized strings."""
+    displayed: dict[str, str | list[str]] = {}
+    for name, value in parameters.items():
+        spec = template.parameters.get(name)
+        if spec is None:
+            displayed[name] = value
+            continue
+        normalized = spec.normalize(value)
+        if name == _BEDROCK_INVENTORY_PARAMETER and isinstance(normalized, list):
+            normalized = list(parse_bedrock_inventory(tuple(normalized)))
+        displayed[name] = normalized
+    return displayed
 
 
 def _validated_stack_name(name: str, *, derived_from: str | None) -> str:
@@ -425,8 +467,10 @@ def validate_command(runtime: Runtime, args: argparse.Namespace) -> int:
         {
             "template": template.source,
             "region": region,
-            "parameters": supplied,
-            "parameters_effective": _effective_parameters(template, supplied),
+            "parameters": _display_parameters(template, supplied),
+            "parameters_effective": _display_parameters(
+                template, _effective_parameters(template, supplied)
+            ),
             "stack_name": _stack_name(args, template),
             "capabilities": [NAMED_IAM_CAPABILITY],
             "checks": checks,
@@ -527,21 +571,30 @@ def _delete_change_set(emitter: Emitter, client: Any, *, name: str, stack_name: 
 
 def _rendered_policies(template: RoleTemplate, parameters: Mapping[str, str]) -> dict[str, Any]:
     properties = template.role_policies
+    rendered_parameters = _display_parameters(template, parameters)
     return {
-        "role_name": render_intrinsics(properties.get("RoleName"), parameters),
-        "max_session_duration": render_intrinsics(properties.get("MaxSessionDuration"), parameters),
-        "trust_policy": render_intrinsics(properties.get("AssumeRolePolicyDocument"), parameters),
-        "inline_policies": render_intrinsics(properties.get("Policies"), parameters),
+        "role_name": render_intrinsics(properties.get("RoleName"), rendered_parameters),
+        "max_session_duration": render_intrinsics(
+            properties.get("MaxSessionDuration"), rendered_parameters
+        ),
+        "trust_policy": render_intrinsics(
+            properties.get("AssumeRolePolicyDocument"), rendered_parameters
+        ),
+        "inline_policies": render_intrinsics(properties.get("Policies"), rendered_parameters),
     }
 
 
 def _parameter_diff(
-    current: Mapping[str, str], requested: Mapping[str, str]
+    template: RoleTemplate,
+    current: Mapping[str, str],
+    requested: Mapping[str, str],
 ) -> list[dict[str, Any]]:
+    before_values = _display_parameters(template, current)
+    after_values = _display_parameters(template, requested)
     diff: list[dict[str, Any]] = []
-    for name in sorted(set(current) | set(requested)):
-        before = current.get(name)
-        after = requested.get(name)
+    for name in sorted(set(before_values) | set(after_values)):
+        before = before_values.get(name)
+        after = after_values.get(name)
         diff.append(
             {
                 "parameter": name,
@@ -605,9 +658,11 @@ class _Plan:
                 "operation": self.operation,
                 "change_set_name": self.change_set_name,
                 "capabilities": [NAMED_IAM_CAPABILITY],
-                "parameters": self.parameters,
+                "parameters": _display_parameters(self.template, self.parameters),
                 "parameter_diff": _parameter_diff(
-                    _stack_parameters(self.existing) if self.existing else {}, self.parameters
+                    self.template,
+                    _stack_parameters(self.existing) if self.existing else {},
+                    self.parameters,
                 ),
                 "resource_changes": (
                     _resource_changes(self.described) if self.described is not None else []
@@ -639,7 +694,9 @@ class _Plan:
         write("")
         write("Parameters:")
         for entry in _parameter_diff(
-            _stack_parameters(self.existing) if self.existing else {}, self.parameters
+            self.template,
+            _stack_parameters(self.existing) if self.existing else {},
+            self.parameters,
         ):
             marker = "~" if entry["changed"] else " "
             write(
@@ -962,11 +1019,13 @@ def status_command(runtime: Runtime, args: argparse.Namespace) -> int:
         raise CliRefusal(f"stack {stack_name!r} does not exist in this account and region")
 
     parameters = _stack_parameters(stack)
+    displayed_parameters = _display_parameters(load_role_template(), parameters)
     outputs = _stack_outputs(stack)
+    inventory = displayed_parameters.get(_BEDROCK_INVENTORY_PARAMETER)
     identity = {
         "role_arn": outputs.get(ROLE_ARN_OUTPUT),
         "role_name": parameters.get("RoleName"),
-        "admitted_model_arn": parameters.get("BedrockModelArn"),
+        "admitted_bedrock_resources": inventory if isinstance(inventory, list) else [],
         "project_bucket_arn_pattern": parameters.get("ProjectBucketArnPattern"),
         "orchestrator_principal_arn": parameters.get("OrchestratorPrincipalArn"),
         "max_session_duration": parameters.get("MaxSessionDuration"),
@@ -976,7 +1035,7 @@ def status_command(runtime: Runtime, args: argparse.Namespace) -> int:
         {
             "stack_name": str(stack_name),
             "stack_status": str(stack.get("StackStatus", "")),
-            "parameters": parameters,
+            "parameters": displayed_parameters,
             "outputs": outputs,
             "identity": identity,
             "mutations_performed": [],

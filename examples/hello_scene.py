@@ -19,7 +19,7 @@ def hello_handler(
     prompt = next(iter(inputs.values())).content.decode("utf-8")
     started_at = _now()
     response = session.client("bedrock-runtime").converse(
-        modelId=context.bedrock_model_arn,
+        modelId=context.bedrock_model_id,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
     )
     completed_at = _now()
@@ -28,7 +28,7 @@ def hello_handler(
     return SceneHandlerResult(
         objects={"result/prompt.txt": prompt, "result/response.txt": text},
         invocation={
-            "model_id": response.get("modelId", context.bedrock_model_arn),
+            "model_id": response.get("modelId", context.bedrock_model_id),
             "request_id": metadata.get("RequestId"),
             "usage": response.get("usage"),
             "stop_reason": response.get("stopReason"),

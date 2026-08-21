@@ -4,6 +4,84 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.5] - 2026-08-21
+
+### Added
+
+- **Bounded Bedrock authority (#12, #18):** one execution role can inventory
+  several foundation-model and inference-profile ARNs while each Scene selects
+  exactly one. An inference-profile ARN remains the exact Bedrock `modelId`;
+  trusted `GetInferenceProfile` resolution validates its bounded foundation-model
+  closure, and the session policy admits only the profile-conditioned support
+  resources needed by that selection.
+- **Revision-safe publication (#10):** publication derives an idempotent revision
+  identity, writes create-only revision pointers, advances `latest` conditionally,
+  and records a durable `published-not-latest` result for a losing writer.
+  Version-ID-safe retries reconcile the exact published revision, and
+  `PublicationWriteDisposition` distinguishes no write, `latest`-only recovery,
+  and package writes. Before an initial present-base attempt, publication
+  reconfirms the recorded ETag and `VersionId`, so a same-body rewrite during the
+  data, manifest, and revision-pointer writes becomes an arbitration loss. The
+  final operation remains the ETag/value CAS that S3 supports.
+- **Run-derived output metadata (#13):** a handler can return
+  `SceneHandlerResult.output_meta`; publication merges it with caller metadata
+  only after refusing key collisions, non-finite/non-JSON values, and credential
+  material, then validates and reports the final merged metadata.
+- **Publication domain invariants (#20):** callers can supply identified
+  `PublicationInvariant` hooks. They inspect a detached pending-revision context,
+  and all findings are aggregated into one pre-write refusal.
+- **Operator-side Genesis authoring (#16):** `pearls genesis author` freezes a
+  local tree, prepares and optionally publishes one revision, binds the exact
+  sealed inputs and handler/seal declarations into reusable revision intent,
+  supports dry-run review, and reports the mutations actually performed.
+- **Sealed runtime requirements (#17):** every Genesis revision now carries a
+  bounded `protocol/requirements.json`. Preflight verifies its exact S3 version
+  and content hash, validates PEP 440/508 declarations, and checks exact installed
+  distribution versions and top-level module resolution before policy
+  compilation or STS minting. Check receipts are v2, run receipts are v3, and
+  `packaging==26.3` is now a direct dependency.
+
+### Security
+
+- Inference-profile closure validation runs with the trusted bootstrap identity;
+  the minted Scene session remains limited to one declared selection rather than
+  inheriting the execution role's whole model inventory.
+- Publication revalidates workflow contracts and caller invariants against the
+  pending revision before mutation. Retry and concurrent-winner paths use the
+  same checks and never relabel another writer's mutations as their own.
+- Genesis authoring rejects symlinks, non-regular files, path escapes, and files
+  that change while being frozen. Published declarations remain bound to the
+  same revision identity on reuse.
+- Runtime-requirement parsing bounds bytes, counts, strings, and diagnostics;
+  malformed or hostile JSON is normalized into a typed refusal before sealed
+  code executes or credentials are minted. Distribution checks and module checks
+  are reported separately so neither is overstated.
+
+### Known limitations
+
+- The base execution role remains inventory-wide; Pearls adds no Bedrock
+  `Deny`/`NotResource` guard. Least authority is enforced in the per-Scene
+  session policy.
+- A failed publication or writer that loses `latest` arbitration can leave
+  unreferenced versioned objects. A retry whose recorded base `latest` version
+  was present does not replay that stale transition, because S3 offers no
+  destination-`VersionId` precondition; the revision remains durably
+  `published-not-latest`. A fresh present-base attempt reconfirms the exact
+  generation before its ETag/value CAS, narrowing but not closing the final
+  read-to-write window. A same-body rewrite inside that window is
+  indistinguishable because Quilt's raw top-hash pointer carries no generation
+  token. `is_latest` therefore denotes current content, not pointer-generation
+  ownership; exact generation fencing requires another coordination protocol.
+  Every create-only revision remains durable regardless.
+- Domain invariants are caller code over one detached pending revision. The CLI
+  does not dynamically load invariant implementations.
+- Genesis authoring proves the frozen bytes, layout, and static declaration
+  shape, not handler safety or compatibility with the authoring machine's local
+  runtime.
+- Runtime preflight does not install or resolve dependencies, validate ABI or
+  transitive compatibility, import module bodies, sandbox execution, or prove a
+  reproducible environment.
+
 ## [0.1.4] - 2026-08-20
 
 ### Added

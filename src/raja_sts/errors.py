@@ -1,5 +1,17 @@
 """Public exception hierarchy for :mod:`raja_sts`."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class InvariantFinding:
+    """One caller-supplied domain-invariant refusal finding."""
+
+    invariant: str
+    message: str
+
 
 class RajaStsError(Exception):
     """Base class for all expected RAJA STS failures."""
@@ -41,9 +53,30 @@ class HandlerContractError(RajaStsError, ValueError):
     """A Scene handler returned unsafe objects or non-serializable metadata."""
 
 
+class GenesisAuthoringError(RajaStsError, ValueError):
+    """A local genesis tree or authoring declaration is unsafe or ambiguous."""
+
+
+class RuntimeRequirementsError(RajaStsError, ValueError):
+    """A sealed runtime declaration is malformed or incompatible with this interpreter."""
+
+
 class PublicationError(RajaStsError):
     """The bounded output package could not be published."""
 
 
+class PublicationConflictError(PublicationError):
+    """A publication revision identity was reused for different content."""
+
+
 class WorkflowContractError(RajaStsError):
     """The output package does not satisfy the destination registry's workflow contract."""
+
+
+class DomainInvariantError(RajaStsError):
+    """Caller-supplied domain invariants refused an output before publication."""
+
+    def __init__(self, findings: tuple[InvariantFinding, ...]) -> None:
+        self.findings = findings
+        detail = "; ".join(f"{finding.invariant}: {finding.message}" for finding in findings)
+        super().__init__(f"Output package failed domain invariants: {detail}")

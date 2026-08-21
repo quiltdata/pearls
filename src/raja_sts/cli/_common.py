@@ -1,11 +1,10 @@
 """Conventions shared by every ``pearls`` command group.
 
-One skeleton keeps the privilege boundary legible: ``scene`` commands operate
-with bounded, short-lived Scene authority, ``infra`` commands mutate persistent
-IAM with administrator authority. Both groups resolve credentials through boto3
-only, print human-readable text on stdout by default and a versioned document
-under ``--json``, never prompt for read-only verbs, always prompt (or require
-``--yes``) for mutating verbs, and never emit credential material.
+One skeleton keeps privilege boundaries legible: ``genesis`` commands use the
+operator's caller-selected identity to author immutable packages, ``scene``
+commands operate with bounded short-lived Scene authority, and ``infra`` commands
+mutate persistent IAM with administrator authority. Commands resolve credentials
+through boto3, separate human and JSON output, and never emit credential material.
 """
 
 from __future__ import annotations
@@ -23,6 +22,12 @@ from typing import Any, TextIO
 import boto3
 
 from .. import __version__
+from ..authoring import (
+    GenesisAuthoringPlan,
+    GenesisAuthoringResult,
+    prepare_genesis_authoring,
+    publish_genesis_authoring,
+)
 from ..errors import RajaStsError
 from ..manifest import ManifestLoader
 from ..runner import (
@@ -38,12 +43,13 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 
 _SCHEMA_ROOT = "https://quiltdata.com/schemas/raja-sts"
-SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v1"
-SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v1"
-INFRA_VALIDATE_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-validate/v1"
-INFRA_PLAN_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-plan/v1"
-INFRA_DEPLOY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-deploy/v1"
-INFRA_STATUS_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-status/v1"
+SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v2"
+SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v3"
+GENESIS_AUTHOR_SCHEMA = f"{_SCHEMA_ROOT}/cli-genesis-author/v1"
+INFRA_VALIDATE_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-validate/v2"
+INFRA_PLAN_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-plan/v2"
+INFRA_DEPLOY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-deploy/v2"
+INFRA_STATUS_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-status/v2"
 INFRA_ASSUME_POLICY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-assume-policy/v1"
 
 
@@ -65,17 +71,19 @@ class Runtime:
 
     stdout: TextIO = field(default_factory=lambda: sys.stdout)
     stderr: TextIO = field(default_factory=lambda: sys.stderr)
-    #: Builds the session for the calls a command makes with the operator's own
-    #: identity: genesis control reads, AssumeRole, CloudFormation, and IAM.
+    #: Builds the session for calls made with the operator's own identity:
+    #: genesis authoring/control reads, AssumeRole, CloudFormation, and IAM.
     session_factory: Callable[..., Any] = boto3.Session
     #: Builds the Scene session from minted credentials. Deliberately separate:
     #: --profile and --region never apply to it, so worker authority comes only
-    #: from the minted credential and the model ARN's region.
+    #: from the minted credential and the selected model/profile ARN's region.
     worker_session_factory: Callable[..., Any] = boto3.Session
     prompt: Callable[[str], str] = input
     clock: Callable[[], datetime] = _utcnow
     sleep: Callable[[float], None] = time.sleep
     manifest_loader: ManifestLoader | None = None
+    prepare_genesis_authoring: Callable[..., GenesisAuthoringPlan] = prepare_genesis_authoring
+    publish_genesis_authoring: Callable[..., GenesisAuthoringResult] = publish_genesis_authoring
     preflight_genesis: Callable[..., GenesisPreflight] = preflight_genesis
     verify_sealed_handler: Callable[..., SealedSource] = verify_sealed_handler
     run_scene_from_genesis: Callable[..., SceneRunResult] = run_scene_from_genesis
