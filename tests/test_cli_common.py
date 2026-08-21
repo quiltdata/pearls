@@ -229,7 +229,7 @@ def test_packaged_template_declares_the_role_arn_output() -> None:
     assert set(template.parameters) == {
         "OrchestratorPrincipalArn",
         "ProjectBucketArnPattern",
-        "BedrockModelArn",
+        "BedrockInvokeModelArns",
         "RoleName",
         "MaxSessionDuration",
     }

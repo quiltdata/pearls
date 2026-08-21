@@ -454,14 +454,14 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
         prompt = inputs[prompt_key].content.decode("utf-8")
         started_at = datetime.now(UTC).isoformat()
         response = session.client("bedrock-runtime").converse(
-            modelId=context.bedrock_model_arn,
+            modelId=context.bedrock_model_id,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
         )
         text = response["output"]["message"]["content"][0]["text"]
         return SceneHandlerResult(
             objects={"result/prompt.txt": prompt, "result/response.txt": text},
             invocation={
-                "model_id": response.get("modelId", context.bedrock_model_arn),
+                "model_id": response.get("modelId", context.bedrock_model_id),
                 "request_id": response["ResponseMetadata"].get("RequestId"),
                 "usage": response.get("usage"),
                 "stop_reason": response.get("stopReason"),

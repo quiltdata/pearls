@@ -14,10 +14,18 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from ..errors import RajaStsError
+from ..bedrock import (
+    BedrockInvocation,
+    BedrockProfileLoader,
+    bedrock_model_region,
+    load_bedrock_profile_resources,
+    parse_bedrock_invocation,
+    parse_bedrock_invocation_declaration,
+)
+from ..errors import InvalidScopeError, RajaStsError
 from ..manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
 from ..models import ManifestObject, PinnedManifestURI
-from ..policy import DEFAULT_MAX_POLICY_CHARACTERS, parse_bedrock_model
+from ..policy import DEFAULT_MAX_POLICY_CHARACTERS
 from ..runner import SceneContext, SceneHandler, SceneHandlerResult
 from ..sealed import SEALED_HANDLER_KEY, SealedSource
 from ..sts import validate_assume_role_request
@@ -51,11 +59,12 @@ class SceneHandlerError(RajaStsError):
 
 
 UNPROVEN_CONDITIONS: tuple[str, ...] = (
-    "Bedrock account-level access to the requested model cannot be proven without "
-    "invoking it; enabling model access stays a console prerequisite.",
+    "Bedrock account-level access to the requested model or profile cannot be proven "
+    "without invoking it; enabling model access stays a console prerequisite.",
     "The base role's trust policy and permissions are not read here. Effective "
     "authority is the intersection of the base role and this session policy, so a "
-    "base role admitting a different model fails closed at run time.",
+    "base inventory missing the selected model/profile or a required support resource "
+    "fails closed at run time.",
     "The output registry's Quilt workflow contract is validated at publication "
     "with the Scene credential, not by this preflight.",
     "Verifying the sealed handler's bytes proves code identity, not code safety. "
@@ -107,7 +116,18 @@ def _add_shared_arguments(parser: argparse.ArgumentParser) -> None:
         "--model-arn",
         required=True,
         metavar="ARN",
-        help="exact Bedrock foundation-model ARN this Scene may invoke",
+        help="exact Bedrock foundation-model or account-scoped inference-profile ARN selected",
+    )
+    parser.add_argument(
+        "--model-resource-arn",
+        action="append",
+        default=[],
+        metavar="ARN",
+        help=(
+            "expected exact supporting foundation-model ARN for an inference profile; "
+            "repeat for every destination returned by GetInferenceProfile, including "
+            "the regionless resource required by a global profile"
+        ),
     )
     parser.add_argument("--scene-id", help="explicit Scene ID; generated when omitted")
     parser.add_argument(
@@ -194,7 +214,7 @@ def _resolve_workflow(args: argparse.Namespace) -> tuple[str | None | object, st
 
 def _validate_arguments(
     runtime: Runtime, args: argparse.Namespace
-) -> tuple[str, str, dict[str, Any], str | None | object, str | None]:
+) -> tuple[str, BedrockInvocation, dict[str, Any], str | None | object, str | None]:
     """Validate every argument shape offline, before any AWS call."""
     scene_id = args.scene_id or generate_scene_id(runtime.clock())
     validate_assume_role_request(
@@ -203,8 +223,12 @@ def _validate_arguments(
         duration_seconds=args.duration_seconds,
         external_id=args.external_id,
     )
-    model_arn = parse_bedrock_model(args.model_arn)
-    if model_arn is None:  # argparse marks --model-arn required.
+    supplied_resources = tuple(args.model_resource_arn)
+    closure: tuple[str, ...] | None = (
+        (str(args.model_arn), *supplied_resources) if supplied_resources else None
+    )
+    declaration = parse_bedrock_invocation_declaration(args.model_arn, closure)
+    if declaration is None:  # argparse marks --model-arn required.
         raise CliRefusal("--model-arn is required")
     metadata = read_json_argument(args.metadata, label="--metadata") if args.metadata else {}
     if args.message is not None and not args.message.strip():
@@ -212,7 +236,39 @@ def _validate_arguments(
     if not args.handler_key:
         raise CliRefusal("--handler-key must not be empty")
     workflow, workflow_display = _resolve_workflow(args)
-    return scene_id, model_arn, metadata, workflow, workflow_display
+    return scene_id, declaration, metadata, workflow, workflow_display
+
+
+def _verify_profile_destinations(
+    session: Any,
+    declaration: BedrockInvocation,
+) -> tuple[BedrockInvocation, BedrockProfileLoader | None]:
+    """Match a declared profile closure to the source Region's AWS metadata."""
+    if declaration.selected.kind == "foundation-model":
+        return declaration, None
+
+    client = session.client(
+        "bedrock",
+        region_name=bedrock_model_region(declaration.selected_model_id),
+    )
+
+    def load(profile_arn: str) -> Sequence[str]:
+        return load_bedrock_profile_resources(client, profile_arn)
+
+    verified = parse_bedrock_invocation(
+        declaration.selected_model_id,
+        declaration.invoke_resources,
+        profile_loader=load,
+    )
+    if verified is None:  # The declaration is non-optional.
+        raise InvalidScopeError("Bedrock profile verification returned no invocation")
+
+    def cached(profile_arn: str) -> Sequence[str]:
+        if profile_arn != verified.selected_model_id:
+            raise InvalidScopeError("cached profile identity does not match the selected model")
+        return verified.supporting_foundation_models
+
+    return verified, cached
 
 
 def _genesis_document(genesis: PinnedManifestURI) -> dict[str, Any]:
@@ -232,7 +288,10 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
     def record(name: str, identity: str, detail: str) -> None:
         checks.append({"name": name, "identity": identity, "status": "pass", "detail": detail})
 
-    scene_id, model_arn, metadata, _workflow, workflow_display = _validate_arguments(runtime, args)
+    scene_id, declaration, metadata, _workflow, workflow_display = _validate_arguments(
+        runtime, args
+    )
+    model_arn = declaration.selected_model_id
     genesis = parse_manifest_uri(args.genesis)
     record(
         "genesis-uri-pinned",
@@ -245,7 +304,12 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
         f"role ARN, Scene ID {scene_id}, {args.duration_seconds}s duration"
         + (", external ID" if args.external_id else ""),
     )
-    record("model-arn-exact", _LOCAL, model_arn)
+    record("model-selection-exact", _LOCAL, model_arn)
+    record(
+        "model-authority-exact",
+        _LOCAL,
+        f"{len(declaration.invoke_resources)} exact bedrock:InvokeModel resource(s)",
+    )
     record(
         "output-metadata-shapes",
         _LOCAL,
@@ -254,15 +318,25 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
         f"workflow {workflow_display if workflow_display is not None else '<explicitly none>'}",
     )
 
-    # Only S3 reads from here on: the bootstrap identity resolves the pinned
-    # revision and reads its sealed control objects by exact version.
+    # The bootstrap identity performs exact S3 reads and, for a profile,
+    # one Bedrock control-plane read. It still mints nothing and writes nothing.
     session = build_session(runtime, args)
+    invocation, profile_loader = _verify_profile_destinations(session, declaration)
+    if invocation.selected.kind == "inference-profile":
+        record(
+            "model-profile-destinations-verified",
+            _BOOTSTRAP,
+            f"{len(invocation.supporting_foundation_models)} exact destination resource(s) "
+            "matched GetInferenceProfile",
+        )
     s3_client = session.client("s3")
     loader = _caching_loader(runtime.manifest_loader)
 
     preflight = runtime.preflight_genesis(
         args.genesis,
         bedrock_model=model_arn,
+        bedrock_invoke_resources=invocation.invoke_resources,
+        bedrock_profile_loader=profile_loader,
         manifest_loader=loader,
         genesis_s3_client=s3_client,
         max_policy_characters=DEFAULT_MAX_POLICY_CHARACTERS,
@@ -318,6 +392,7 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
             "genesis": _genesis_document(genesis),
             "role_arn": args.role_arn,
             "model_arn": model_arn,
+            "model": invocation.report(),
             "duration_seconds": args.duration_seconds,
             "handler": sealed.report(),
             "authority": compilation.report(),
@@ -367,7 +442,7 @@ def _receipt(
     genesis: PinnedManifestURI,
     sealed: SealedSource,
     args: argparse.Namespace,
-    model_arn: str,
+    invocation: BedrockInvocation,
     metadata: Mapping[str, Any],
     workflow_display: str | None,
     result: Any,
@@ -379,7 +454,8 @@ def _receipt(
             "genesis": _genesis_document(genesis),
             "handler": sealed.report(),
             "role_arn": args.role_arn,
-            "model_arn": model_arn,
+            "model_arn": invocation.selected_model_id,
+            "model": invocation.report(),
             "assumed_role_arn": result.assumed_role_arn,
             "output": {
                 "package_name": result.output_package.name,
@@ -432,10 +508,12 @@ def _deferred_handler(sealed: SealedSource, emitter: Emitter) -> SceneHandler:
 def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
     """Execute exactly one Scene from its pinned genesis revision."""
     emitter = Emitter(runtime, args.json_output)
-    scene_id, model_arn, metadata, workflow, workflow_display = _validate_arguments(runtime, args)
+    scene_id, declaration, metadata, workflow, workflow_display = _validate_arguments(runtime, args)
+    model_arn = declaration.selected_model_id
     genesis = parse_manifest_uri(args.genesis)
 
     session = build_session(runtime, args)
+    invocation, profile_loader = _verify_profile_destinations(session, declaration)
     s3_client = session.client("s3")
     sts_client = session.client("sts")
     loader = _caching_loader(runtime.manifest_loader)
@@ -457,6 +535,8 @@ def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
         scene_id=scene_id,
         handler=_deferred_handler(sealed, emitter),
         bedrock_model=model_arn,
+        bedrock_invoke_resources=invocation.invoke_resources,
+        bedrock_profile_loader=profile_loader,
         duration_seconds=args.duration_seconds,
         external_id=args.external_id,
         manifest_loader=loader,
@@ -474,7 +554,7 @@ def run_command(runtime: Runtime, args: argparse.Namespace) -> int:
         genesis=genesis,
         sealed=sealed,
         args=args,
-        model_arn=model_arn,
+        invocation=invocation,
         metadata=metadata,
         workflow_display=workflow_display,
         result=result,

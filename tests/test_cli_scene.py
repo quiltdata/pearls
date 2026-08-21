@@ -10,8 +10,12 @@ import pytest
 from cli_support import (
     GENESIS_URI,
     MODEL_ARN,
+    PROFILE_ARN,
+    PROFILE_MODEL_EAST_ARN,
+    PROFILE_MODEL_WEST_ARN,
     ROLE_ARN,
     TOP_HASH,
+    FakeBedrockControl,
     FakeGenesisS3,
     FakeSession,
     FakeSTS,
@@ -44,11 +48,13 @@ class SceneHarness:
         self.fixture = fixture or GenesisFixture()
         self.events: list[str] = []
         self.genesis_s3 = FakeGenesisS3(self.fixture)
+        self.bedrock = FakeBedrockControl()
         self.sts = FakeSTS(self.events)
         self.worker_s3 = FakeWorkerS3(self.events)
         self.worker_session = FakeWorkerSession(self.worker_s3, self.events)
         self.session = FakeSession(
-            {"s3": self.genesis_s3, "sts": self.sts}, region_name="us-east-1"
+            {"bedrock": self.bedrock, "s3": self.genesis_s3, "sts": self.sts},
+            region_name="us-east-1",
         )
         self.streams = Streams()
         self.runner = Recorder(run_scene_from_genesis)
@@ -183,7 +189,8 @@ def test_check_labels_which_checks_needed_the_trusted_bootstrap_identity() -> No
     assert by_name["sealed-handler-verified"] == "trusted-bootstrap"
     assert by_name["genesis-manifest-resolved"] == "trusted-bootstrap"
     assert by_name["argument-shapes"] == "local"
-    assert by_name["model-arn-exact"] == "local"
+    assert by_name["model-selection-exact"] == "local"
+    assert by_name["model-authority-exact"] == "local"
     assert by_name["session-policy-compiled"] == "local"
 
 
@@ -628,3 +635,125 @@ def test_run_refuses_a_revision_with_no_sealed_handler_before_minting() -> None:
     assert "declares no sealed handler" in harness.streams.stderr
     assert harness.sts.requests == []
     assert harness.runner.calls == []
+
+
+def _profile_arguments() -> list[str]:
+    arguments = list(BASE_ARGUMENTS)
+    arguments[arguments.index("--model-arn") + 1] = PROFILE_ARN
+    arguments.extend(
+        [
+            "--model-resource-arn",
+            PROFILE_MODEL_WEST_ARN,
+            "--model-resource-arn",
+            PROFILE_MODEL_EAST_ARN,
+        ]
+    )
+    return arguments
+
+
+def test_check_accepts_profile_and_reports_selected_id_separately_from_resources() -> None:
+    harness = SceneHarness()
+
+    code = harness.invoke("scene", "check", *_profile_arguments(), "--json")
+
+    assert code == 0
+    payload = harness.streams.json()
+    assert payload["model_arn"] == PROFILE_ARN
+    assert payload["model"] == {
+        "selected_model_id": PROFILE_ARN,
+        "selected_resource_type": "inference-profile",
+        "invoke_resources": [PROFILE_ARN, PROFILE_MODEL_EAST_ARN, PROFILE_MODEL_WEST_ARN],
+    }
+    assert payload["authority"]["bedrock"] == payload["model"]
+    assert payload["mutations_performed"] == []
+
+
+def test_run_threads_profile_closure_and_uses_selected_profile_region() -> None:
+    harness = SceneHarness()
+
+    code = harness.invoke("scene", "run", *_profile_arguments(), "--json")
+
+    assert code == 0
+    assert harness.runner.kwargs["bedrock_model"] == PROFILE_ARN
+    assert harness.runner.kwargs["bedrock_invoke_resources"] == (
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST_ARN,
+        PROFILE_MODEL_WEST_ARN,
+    )
+    assert harness.worker_session.kwargs["region_name"] == "us-east-1"
+    assert harness.streams.json()["model"]["selected_model_id"] == PROFILE_ARN
+    policy = json.loads(harness.sts.requests[0]["Policy"])
+    model_statements = [
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Action") == "bedrock:InvokeModel"
+    ]
+    assert model_statements == [
+        {
+            "Action": "bedrock:InvokeModel",
+            "Effect": "Allow",
+            "Resource": PROFILE_ARN,
+        },
+        {
+            "Action": "bedrock:InvokeModel",
+            "Condition": {
+                "StringLike": {
+                    "bedrock:InferenceProfileArn": PROFILE_ARN,
+                }
+            },
+            "Effect": "Allow",
+            "Resource": [PROFILE_MODEL_EAST_ARN, PROFILE_MODEL_WEST_ARN],
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--model-resource-arn", MODEL_ARN],
+        ["--model-resource-arn", PROFILE_MODEL_EAST_ARN, "--model-resource-arn", "*"],
+    ],
+    ids=["missing-support", "unrelated-support", "wildcard-support"],
+)
+def test_profile_argument_closure_fails_closed_before_aws(extra: list[str]) -> None:
+    harness = SceneHarness()
+    arguments = list(BASE_ARGUMENTS)
+    arguments[arguments.index("--model-arn") + 1] = PROFILE_ARN
+
+    code = harness.invoke("scene", "check", *arguments, *extra)
+
+    assert code == 1
+    assert "InvalidScopeError" in harness.streams.stderr
+    assert harness.session.requested == []
+
+
+def test_profile_argument_closure_rejects_same_model_non_destination_before_minting() -> None:
+    harness = SceneHarness()
+    extra = "arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+
+    code = harness.invoke(
+        "scene",
+        "run",
+        *_profile_arguments(),
+        "--model-resource-arn",
+        extra,
+    )
+
+    assert code == 1
+    assert "exact GetInferenceProfile destinations" in harness.streams.stderr
+    assert "unexpected" in harness.streams.stderr
+    assert harness.bedrock.requests == [{"inferenceProfileIdentifier": PROFILE_ARN}]
+    assert harness.sts.requests == []
+    assert harness.runner.calls == []
+
+
+def test_profile_check_reports_authoritative_destination_verification() -> None:
+    harness = SceneHarness()
+
+    assert harness.invoke("scene", "check", *_profile_arguments(), "--json") == 0
+
+    payload = harness.streams.json()
+    checks = {entry["name"]: entry for entry in payload["checks"]}
+    assert checks["model-profile-destinations-verified"]["identity"] == "trusted-bootstrap"
+    assert harness.bedrock.requests == [{"inferenceProfileIdentifier": PROFILE_ARN}]

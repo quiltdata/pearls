@@ -58,13 +58,17 @@ class ParameterSpec:
     max_value: float | None = None
     description: str | None = None
 
-    def validate(self, value: str) -> None:
-        """Check one supplied value against the template's own constraints."""
-        if self.allowed_pattern is not None and not re.fullmatch(self.allowed_pattern, value):
-            raise CliRefusal(
-                f"{self.name} value {value!r} does not match the template's "
-                f"AllowedPattern {self.allowed_pattern}"
-            )
+    def normalize(self, value: str) -> str | list[str]:
+        """Validate one supplied value and return its CloudFormation ``Ref`` shape."""
+        if self.type == "CommaDelimitedList":
+            entries = [entry.strip() for entry in value.split(",")]
+            if not entries or any(not entry for entry in entries):
+                raise CliRefusal(f"{self.name} must be a non-empty comma-delimited list")
+            for entry in entries:
+                self._validate_pattern(entry)
+            return entries
+
+        self._validate_pattern(value)
         if self.type == "Number":
             try:
                 numeric = float(value)
@@ -74,6 +78,18 @@ class ParameterSpec:
                 raise CliRefusal(f"{self.name} must be at least {self.min_value:g}, got {value}")
             if self.max_value is not None and numeric > self.max_value:
                 raise CliRefusal(f"{self.name} must be at most {self.max_value:g}, got {value}")
+        return value
+
+    def _validate_pattern(self, value: str) -> None:
+        if self.allowed_pattern is not None and not re.fullmatch(self.allowed_pattern, value):
+            raise CliRefusal(
+                f"{self.name} value {value!r} does not match the template's "
+                f"AllowedPattern {self.allowed_pattern}"
+            )
+
+    def validate(self, value: str) -> None:
+        """Check one supplied value against the template's own constraints."""
+        self.normalize(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +108,11 @@ class RoleTemplate:
             raise CliRefusal("the template declares no such parameter(s): " + ", ".join(unknown))
         for name, value in values.items():
             self.parameters[name].validate(value)
+
+    def normalize_parameters(self, values: Mapping[str, str]) -> dict[str, str | list[str]]:
+        """Return values in the shape produced by CloudFormation ``Ref``."""
+        self.validate_parameters(values)
+        return {name: self.parameters[name].normalize(value) for name, value in values.items()}
 
     @property
     def role_policies(self) -> Mapping[str, Any]:
@@ -170,7 +191,7 @@ def load_role_template(template_file: str | None = None) -> RoleTemplate:
     )
 
 
-def render_intrinsics(value: Any, parameters: Mapping[str, str]) -> Any:
+def render_intrinsics(value: Any, parameters: Mapping[str, Any]) -> Any:
     """Substitute ``Ref`` and ``Fn::Sub`` parameter references for review output.
 
     Only the forms this template uses are supported. Anything else is left as a
@@ -183,7 +204,11 @@ def render_intrinsics(value: Any, parameters: Mapping[str, str]) -> Any:
         if set(value) == {"Fn::Sub"} and isinstance(value["Fn::Sub"], str):
             return re.sub(
                 r"\$\{([A-Za-z0-9:]+)\}",
-                lambda match: parameters.get(match.group(1), f"<unresolved Sub {match.group(1)}>"),
+                lambda match: (
+                    str(parameters[match.group(1)])
+                    if match.group(1) in parameters
+                    else f"<unresolved Sub {match.group(1)}>"
+                ),
                 value["Fn::Sub"],
             )
         if set(value) == {"Fn::GetAtt"}:

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from .bedrock import BedrockInvocation
+
 PolicyMode = Literal["per-object-version", "per-object", "mixed", "per-prefix"]
 
 
@@ -138,14 +140,30 @@ class CompiledPolicy:
     warnings: tuple[str, ...] = ()
     bedrock_model_arn: str | None = None
     writable_selectors: tuple[OutputSelector, ...] = ()
+    bedrock_invoke_resources: tuple[str, ...] = ()
 
     @property
     def size(self) -> int:
         """Return the plaintext character count enforced by STS."""
         return len(self.policy_json)
 
+    @property
+    def bedrock_model_id(self) -> str | None:
+        """Return the selected Bedrock invocation identifier."""
+        return self.bedrock_model_arn
+
+    @property
+    def bedrock_invocation(self) -> BedrockInvocation | None:
+        """Return the compiler-verified selection and exact IAM resource closure."""
+        if self.bedrock_model_arn is None:
+            return None
+        if not self.bedrock_invoke_resources:
+            raise ValueError("compiled Bedrock authority has no invoke resources")
+        return BedrockInvocation(self.bedrock_model_arn, self.bedrock_invoke_resources)
+
     def report(self) -> dict[str, Any]:
         """Return serializable, non-secret compilation evidence."""
+        invocation = self.bedrock_invocation
         return {
             "manifest_uri": self.manifest.original,
             "top_hash": self.manifest.top_hash,
@@ -171,7 +189,10 @@ class CompiledPolicy:
                 }
                 for selector in self.writable_selectors
             ],
+            # Compatibility scalar: this is the value passed as Bedrock modelId.
             "bedrock_model_arn": self.bedrock_model_arn,
+            "bedrock_invoke_resources": list(self.bedrock_invoke_resources),
+            "bedrock": invocation.report() if invocation is not None else None,
             "warnings": list(self.warnings),
         }
 

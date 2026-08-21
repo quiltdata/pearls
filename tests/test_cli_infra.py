@@ -9,6 +9,10 @@ from cli_support import (
     BUCKET_PATTERN,
     MODEL_ARN,
     ORCHESTRATOR_ARN,
+    PROFILE_ARN,
+    PROFILE_MODEL_EAST_ARN,
+    PROFILE_MODEL_WEST_ARN,
+    SECOND_MODEL_ARN,
     FakeSession,
     Streams,
     make_runtime,
@@ -146,7 +150,7 @@ def deployed_stack(
     name: str = ROLE_NAME,
     status: str = "CREATE_COMPLETE",
     role_arn: str | None = STACK_ARN,
-    model_arn: str = MODEL_ARN,
+    model_arns: tuple[str, ...] = (MODEL_ARN,),
 ) -> dict[str, dict[str, Any]]:
     outputs = (
         [{"OutputKey": "SceneExecutionRoleArn", "OutputValue": role_arn}]
@@ -160,7 +164,10 @@ def deployed_stack(
             "Parameters": [
                 {"ParameterKey": "OrchestratorPrincipalArn", "ParameterValue": ORCHESTRATOR_ARN},
                 {"ParameterKey": "ProjectBucketArnPattern", "ParameterValue": BUCKET_PATTERN},
-                {"ParameterKey": "BedrockModelArn", "ParameterValue": model_arn},
+                {
+                    "ParameterKey": "BedrockInvokeModelArns",
+                    "ParameterValue": ",".join(model_arns),
+                },
                 {"ParameterKey": "RoleName", "ParameterValue": name},
                 {"ParameterKey": "MaxSessionDuration", "ParameterValue": "3600"},
             ],
@@ -198,7 +205,7 @@ def test_validate_checks_the_packaged_template_without_calling_aws() -> None:
 
     assert code == 0
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-infra-validate/v1"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-infra-validate/v2"
     assert payload["status"] == "ok"
     assert payload["template"].endswith("scene-execution-role.yaml")
     assert payload["capabilities"] == ["CAPABILITY_NAMED_IAM"]
@@ -249,10 +256,9 @@ def test_validate_applies_template_defaults_when_a_parameter_is_omitted() -> Non
     [
         ("--orchestrator-principal-arn", "arn:aws:iam::123:role/short-account"),
         ("--project-bucket-arn-pattern", "arn:aws:s3:::Uppercase-Bucket"),
-        ("--bedrock-model-arn", "arn:aws:bedrock:us-east-1:123456789012:inference-profile/x"),
         ("--role-name", "has spaces"),
     ],
-    ids=["principal", "bucket-pattern", "inference-profile", "role-name"],
+    ids=["principal", "bucket-pattern", "role-name"],
 )
 def test_validate_rejects_values_the_template_would_reject(flag: str, value: str) -> None:
     harness = InfraHarness()
@@ -292,7 +298,7 @@ def test_validate_rejects_a_model_in_a_different_region_than_the_deployment() ->
     assert code == 1
     stderr = harness.streams.stderr
     assert "us-east-1" in stderr and "us-west-2" in stderr
-    assert "fail-closed" in stderr
+    assert "fail closed" in stderr
 
 
 def test_explicit_region_argument_wins_over_the_profile_region() -> None:
@@ -435,7 +441,7 @@ def test_plan_renders_the_trust_policy_and_inline_role_policy_for_review() -> No
 def test_plan_of_an_existing_stack_is_an_update_with_a_parameter_diff() -> None:
     harness = InfraHarness(
         cloudformation=FakeCloudFormation(
-            stacks=deployed_stack(model_arn="arn:aws:bedrock:us-east-1::foundation-model/old")
+            stacks=deployed_stack(model_arns=("arn:aws:bedrock:us-east-1::foundation-model/old",))
         )
     )
 
@@ -444,7 +450,7 @@ def test_plan_of_an_existing_stack_is_an_update_with_a_parameter_diff() -> None:
     payload = harness.streams.json()
     assert payload["operation"] == "UPDATE"
     changed = {entry["parameter"] for entry in payload["parameter_diff"] if entry["changed"]}
-    assert changed == {"BedrockModelArn"}
+    assert changed == {"BedrockInvokeModelArns"}
 
 
 def test_a_stack_awaiting_review_still_needs_a_create_change_set() -> None:
@@ -491,7 +497,7 @@ def test_plan_surfaces_a_failed_change_set_and_cleans_it_up() -> None:
     harness = InfraHarness(
         cloudformation=FakeCloudFormation(
             change_set_status="FAILED",
-            change_set_reason="Parameter validation failed for BedrockModelArn",
+            change_set_reason="Parameter validation failed for BedrockInvokeModelArns",
         )
     )
 
@@ -1004,12 +1010,12 @@ def test_status_reports_the_identity_a_deployed_role_grants() -> None:
 
     assert code == 0
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-infra-status/v1"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-infra-status/v2"
     assert payload["stack_status"] == "CREATE_COMPLETE"
     assert payload["identity"] == {
         "role_arn": STACK_ARN,
         "role_name": ROLE_NAME,
-        "admitted_model_arn": MODEL_ARN,
+        "admitted_bedrock_resources": [MODEL_ARN],
         "project_bucket_arn_pattern": BUCKET_PATTERN,
         "orchestrator_principal_arn": ORCHESTRATOR_ARN,
         "max_session_duration": "3600",
@@ -1023,7 +1029,7 @@ def test_status_accepts_a_role_name_and_prints_a_readable_report() -> None:
     assert harness.invoke("infra", "status", "--role-name", ROLE_NAME) == 0
 
     stdout = harness.streams.stdout
-    assert "admitted model arn" in stdout
+    assert "admitted bedrock resources" in stdout
     assert MODEL_ARN in stdout
     assert "intersection" in stdout
 
@@ -1260,3 +1266,160 @@ def test_confirmation_accepts_a_case_insensitive_yes() -> None:
 
     assert code == 0
     assert harness.cloudformation.executed != []
+
+
+def parameters_with_models(*model_arns: str) -> list[str]:
+    parameters = list(PARAMETERS)
+    index = parameters.index("--bedrock-model-arn")
+    del parameters[index : index + 2]
+    for model_arn in model_arns:
+        parameters.extend(["--bedrock-model-arn", model_arn])
+    return parameters
+
+
+def test_validate_exposes_a_canonical_nonempty_model_inventory() -> None:
+    harness = InfraHarness()
+
+    code = harness.invoke(
+        "infra",
+        "validate",
+        *parameters_with_models(SECOND_MODEL_ARN, MODEL_ARN),
+        "--json",
+    )
+
+    assert code == 0
+    expected = sorted([MODEL_ARN, SECOND_MODEL_ARN])
+    payload = harness.streams.json()
+    assert payload["parameters"]["BedrockInvokeModelArns"] == expected
+    assert payload["parameters_effective"]["BedrockInvokeModelArns"] == expected
+    assert harness.session.requested == []
+
+
+def test_plan_serializes_and_renders_the_exact_inventory_as_a_list() -> None:
+    harness = InfraHarness()
+
+    code = harness.invoke(
+        "infra",
+        "plan",
+        *parameters_with_models(SECOND_MODEL_ARN, MODEL_ARN),
+        "--json",
+    )
+
+    assert code == 0
+    expected = sorted([MODEL_ARN, SECOND_MODEL_ARN])
+    sent = {
+        item["ParameterKey"]: item["ParameterValue"]
+        for item in harness.cloudformation.created[0]["Parameters"]
+    }
+    assert sent["BedrockInvokeModelArns"] == ",".join(expected)
+    payload = harness.streams.json()
+    assert payload["parameters"]["BedrockInvokeModelArns"] == expected
+    statements = payload["rendered"]["inline_policies"][0]["PolicyDocument"]["Statement"]
+    bedrock = next(item for item in statements if item["Action"] == "bedrock:InvokeModel")
+    assert bedrock["Resource"] == expected
+
+
+def test_validate_accepts_exact_cross_region_resources_only_for_a_profile() -> None:
+    harness = InfraHarness(region="us-east-1")
+
+    code = harness.invoke(
+        "infra",
+        "validate",
+        *parameters_with_models(
+            PROFILE_MODEL_WEST_ARN,
+            PROFILE_ARN,
+            PROFILE_MODEL_EAST_ARN,
+        ),
+        "--json",
+    )
+
+    assert code == 0
+    expected = sorted([PROFILE_ARN, PROFILE_MODEL_EAST_ARN, PROFILE_MODEL_WEST_ARN])
+    payload = harness.streams.json()
+    assert payload["parameters"]["BedrockInvokeModelArns"] == expected
+    checks = {entry["name"]: entry["detail"] for entry in payload["checks"]}
+    assert "cross-region profile support" in checks["model-region-consistency"]
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        (MODEL_ARN, MODEL_ARN),
+        ("arn:aws:bedrock:us-east-1::foundation-model/*",),
+        ("arn:aws:bedrock:us-east-1:123456789012:custom-model/example",),
+        (PROFILE_ARN,),
+        (PROFILE_ARN, MODEL_ARN),
+        ("arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-micro-v1:0",),
+    ],
+    ids=[
+        "duplicate",
+        "wildcard",
+        "custom-model",
+        "profile-without-support",
+        "profile-with-unrelated-support",
+        "foreign-direct-model",
+    ],
+)
+def test_validate_rejects_invalid_or_unusable_inventory_before_aws(
+    models: tuple[str, ...],
+) -> None:
+    harness = InfraHarness(region="us-east-1")
+
+    code = harness.invoke("infra", "validate", *parameters_with_models(*models))
+
+    assert code == 1
+    assert harness.session.requested == []
+    assert harness.cloudformation.calls == []
+
+
+def test_plan_diff_and_no_op_compare_logical_inventory_lists() -> None:
+    expected = tuple(sorted([MODEL_ARN, SECOND_MODEL_ARN]))
+    harness = InfraHarness(
+        cloudformation=FakeCloudFormation(
+            stacks=deployed_stack(model_arns=expected),
+            change_set_status="FAILED",
+            change_set_reason="No updates are to be performed.",
+        )
+    )
+
+    code = harness.invoke(
+        "infra",
+        "plan",
+        *parameters_with_models(SECOND_MODEL_ARN, MODEL_ARN),
+        "--json",
+    )
+
+    assert code == 0
+    payload = harness.streams.json()
+    assert payload["status"] == "no-change"
+    inventory_diff = next(
+        item for item in payload["parameter_diff"] if item["parameter"] == "BedrockInvokeModelArns"
+    )
+    assert inventory_diff == {
+        "parameter": "BedrockInvokeModelArns",
+        "current": list(expected),
+        "requested": list(expected),
+        "changed": False,
+    }
+
+
+def test_status_reports_the_complete_model_inventory() -> None:
+    inventory = tuple(sorted([MODEL_ARN, SECOND_MODEL_ARN]))
+    harness = InfraHarness(
+        cloudformation=FakeCloudFormation(stacks=deployed_stack(model_arns=inventory))
+    )
+
+    assert harness.invoke("infra", "status", "--stack-name", ROLE_NAME, "--json") == 0
+
+    payload = harness.streams.json()
+    assert payload["parameters"]["BedrockInvokeModelArns"] == list(inventory)
+    assert payload["identity"]["admitted_bedrock_resources"] == list(inventory)
+
+
+def test_template_validates_each_comma_delimited_inventory_element() -> None:
+    template = load_role_template()
+
+    with pytest.raises(CliRefusal, match="AllowedPattern"):
+        template.validate_parameters(
+            {"BedrockInvokeModelArns": f"{MODEL_ARN},arn:aws:bedrock:us-east-1::custom-model/x"}
+        )

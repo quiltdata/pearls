@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from os.path import commonprefix
 from typing import Any
 
+from .bedrock import BedrockInvocation, BedrockProfileLoader, parse_bedrock_invocation
+from .bedrock import bedrock_model_account as bedrock_model_account
+from .bedrock import bedrock_model_region as bedrock_model_region
+from .bedrock import parse_bedrock_model as parse_bedrock_model
 from .errors import InvalidScopeError, PolicySizeError
 from .manifest import (
     ManifestLoader,
@@ -25,14 +28,11 @@ _ALLOWED_SCOPE_KEYS = {
     "writable_package",
     "writable",
     "bedrock_model",
+    "bedrock_invoke_resources",
     "allow_prefix_fallback",
     "require_version_ids",
 }
 _RUNTIME_OUTPUT_KEYS = frozenset({"run/scene.json", "run/invocation.json"})
-_BEDROCK_MODEL_RE = re.compile(
-    r"^arn:aws:bedrock:(?P<region>[a-z]{2}-[a-z]+-\d+):"
-    r":foundation-model/[A-Za-z0-9][A-Za-z0-9._:-]*$"
-)
 
 
 def _parse_readable(value: object) -> tuple[str, ...]:
@@ -56,27 +56,6 @@ def _parse_boolean(scope: Mapping[str, object], key: str) -> bool:
     if not isinstance(value, bool):
         raise InvalidScopeError(f"{key} must be a boolean")
     return value
-
-
-def parse_bedrock_model(value: object) -> str | None:
-    """Validate one exact commercial-partition foundation-model ARN, or ``None``."""
-    if value is None:
-        return None
-    if not isinstance(value, str) or not _BEDROCK_MODEL_RE.fullmatch(value):
-        raise InvalidScopeError(
-            "bedrock_model must be one exact commercial-partition foundation-model ARN"
-        )
-    return value
-
-
-def bedrock_model_region(model_arn: str) -> str:
-    """Return the AWS region named by a validated foundation-model ARN."""
-    match = _BEDROCK_MODEL_RE.fullmatch(model_arn) if isinstance(model_arn, str) else None
-    if match is None:
-        raise InvalidScopeError(
-            "bedrock_model must be one exact commercial-partition foundation-model ARN"
-        )
-    return match.group("region")
 
 
 def _parse_output_scope(
@@ -149,10 +128,16 @@ def _guardrail_statements(
 
 
 def _write_statement(output: OutputPackage) -> dict[str, Any]:
+    """Allow writes only where the paired exact NotResource deny does not apply.
+
+    The wildcard avoids duplicating a potentially large resource list in the STS
+    plaintext policy. ``_guardrail_statements`` always emits the matching explicit
+    deny, so IAM's deny precedence leaves the effective write set unchanged.
+    """
     return {
         "Effect": "Allow",
         "Action": "s3:PutObject",
-        "Resource": list(output.write_resources),
+        "Resource": "*",
     }
 
 
@@ -164,10 +149,41 @@ def _output_versioning_statement(output: OutputPackage) -> dict[str, Any]:
     }
 
 
-def _bedrock_statement(model_arn: str | None) -> list[dict[str, Any]]:
-    if model_arn is None:
+def _bedrock_statements(invocation: BedrockInvocation | None) -> list[dict[str, Any]]:
+    """Pin one model ID and condition profile supports on that exact profile."""
+    if invocation is None:
         return []
-    return [{"Effect": "Allow", "Action": "bedrock:InvokeModel", "Resource": model_arn}]
+    if invocation.selected.kind == "foundation-model":
+        return [
+            {
+                "Effect": "Allow",
+                "Action": "bedrock:InvokeModel",
+                "Resource": invocation.selected_model_id,
+            }
+        ]
+
+    supporting: str | list[str]
+    if len(invocation.supporting_foundation_models) == 1:
+        supporting = invocation.supporting_foundation_models[0]
+    else:
+        supporting = list(invocation.supporting_foundation_models)
+    return [
+        {
+            "Effect": "Allow",
+            "Action": "bedrock:InvokeModel",
+            "Resource": invocation.selected_model_id,
+        },
+        {
+            "Effect": "Allow",
+            "Action": "bedrock:InvokeModel",
+            "Resource": supporting,
+            "Condition": {
+                "StringLike": {
+                    "bedrock:InferenceProfileArn": invocation.selected_model_id,
+                }
+            },
+        },
+    ]
 
 
 def _current_read_statement(resources: Sequence[str]) -> dict[str, Any]:
@@ -272,12 +288,16 @@ def compile(
     *,
     manifest_loader: ManifestLoader | None = None,
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
+    include_manifest_read: bool = True,
+    bedrock_profile_loader: BedrockProfileLoader | None = None,
 ) -> CompiledPolicy:
     """Compile a pinned Quilt manifest and logical scope into an STS policy.
 
     Exact object resources are always attempted first. If they exceed the STS
     plaintext policy limit, compilation fails closed unless the caller explicitly
     sets ``allow_prefix_fallback`` in the sealed scope specification.
+    ``include_manifest_read=False`` is reserved for runners that already resolved
+    the manifest and carry every selected object descriptor in memory.
     """
     if not isinstance(scope_spec, Mapping):
         raise InvalidScopeError("scope_spec must be a mapping")
@@ -291,11 +311,17 @@ def compile(
         raise ValueError(
             f"max_policy_characters must be between 1 and {DEFAULT_MAX_POLICY_CHARACTERS}"
         )
+    if not isinstance(include_manifest_read, bool):
+        raise ValueError("include_manifest_read must be a boolean")
 
     manifest = parse_manifest_uri(manifest_uri)
     selectors = _parse_readable(scope_spec.get("readable"))
     output, writable_selectors = _parse_output_scope(scope_spec)
-    bedrock_model_arn = parse_bedrock_model(scope_spec.get("bedrock_model"))
+    bedrock = parse_bedrock_invocation(
+        scope_spec.get("bedrock_model"),
+        scope_spec.get("bedrock_invoke_resources"),
+        profile_loader=bedrock_profile_loader,
+    )
     allow_prefix_fallback = _parse_boolean(scope_spec, "allow_prefix_fallback")
     require_version_ids = _parse_boolean(scope_spec, "require_version_ids")
 
@@ -307,18 +333,20 @@ def compile(
             "selected objects have no S3 version ID: " + ", ".join(missing_versions)
         )
 
-    metadata_read_resources = [manifest.manifest_arn, *output.read_resources]
+    metadata_read_resources = list(output.read_resources)
+    if include_manifest_read:
+        metadata_read_resources.insert(0, manifest.manifest_arn)
     read_statements, mode = _exact_read_statements(selected, metadata_read_resources)
     current_read_resources = [item.arn for item in selected if item.version_id is None]
     current_read_resources.extend(metadata_read_resources)
     guardrails = _guardrail_statements(current_read_resources, output)
-    model_statement = _bedrock_statement(bedrock_model_arn)
+    model_statements = _bedrock_statements(bedrock)
     document, policy_json = _serialize(
         [
             *guardrails,
             *read_statements,
             _output_versioning_statement(output),
-            *model_statement,
+            *model_statements,
             _write_statement(output),
         ]
     )
@@ -354,7 +382,7 @@ def compile(
                 *guardrails,
                 *read_statements,
                 _output_versioning_statement(output),
-                *model_statement,
+                *model_statements,
                 _write_statement(output),
             ]
         )
@@ -372,7 +400,8 @@ def compile(
         readable_selectors=selectors,
         selected_objects=selected,
         output_package=output,
-        bedrock_model_arn=bedrock_model_arn,
+        bedrock_model_arn=bedrock.selected_model_id if bedrock is not None else None,
         warnings=warnings,
         writable_selectors=writable_selectors,
+        bedrock_invoke_resources=bedrock.invoke_resources if bedrock is not None else (),
     )

@@ -40,10 +40,10 @@ EXIT_USAGE = 2
 _SCHEMA_ROOT = "https://quiltdata.com/schemas/raja-sts"
 SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v1"
 SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v1"
-INFRA_VALIDATE_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-validate/v1"
-INFRA_PLAN_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-plan/v1"
-INFRA_DEPLOY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-deploy/v1"
-INFRA_STATUS_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-status/v1"
+INFRA_VALIDATE_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-validate/v2"
+INFRA_PLAN_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-plan/v2"
+INFRA_DEPLOY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-deploy/v2"
+INFRA_STATUS_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-status/v2"
 INFRA_ASSUME_POLICY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-assume-policy/v1"
 
 
@@ -70,7 +70,7 @@ class Runtime:
     session_factory: Callable[..., Any] = boto3.Session
     #: Builds the Scene session from minted credentials. Deliberately separate:
     #: --profile and --region never apply to it, so worker authority comes only
-    #: from the minted credential and the model ARN's region.
+    #: from the minted credential and the selected model/profile ARN's region.
     worker_session_factory: Callable[..., Any] = boto3.Session
     prompt: Callable[[str], str] = input
     clock: Callable[[], datetime] = _utcnow

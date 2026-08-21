@@ -187,10 +187,16 @@ must never be logged or committed.
 
 ### Run one bounded Scene
 
-A sealed runner scope adds one exact Bedrock foundation-model ARN. The public
-runner compiles and mints once, reads and verifies only selected object
-versions, passes one explicit scoped session to the handler, and publishes a
-Quilt output Package without listing the bucket:
+A sealed runner scope selects one exact Bedrock foundation-model or account-scoped
+inference-profile ARN. The selected ARN is the `modelId` passed to Bedrock; a
+separate exact `bedrock_invoke_resources` closure records every IAM resource
+needed for that invocation. A direct foundation model derives its one-resource
+closure automatically. An inference profile must explicitly include its own ARN
+and every foundation-model ARN returned for that profile, including the
+regionless support ARN used by a global profile. The public runner compiles and
+mints once, reads and verifies only selected object versions,
+passes one explicit scoped session to the handler, and publishes a Quilt output
+Package without listing the bucket:
 
 ```python
 from raja_sts import SceneHandlerResult, run_scene
@@ -199,7 +205,7 @@ from raja_sts import SceneHandlerResult, run_scene
 def handler(inputs, session, context):
     prompt = inputs["input-content/prompt.txt"].content.decode()
     response = session.client("bedrock-runtime").converse(
-        modelId=context.bedrock_model_arn,
+        modelId=context.bedrock_model_id,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
     )
     return SceneHandlerResult(
@@ -220,6 +226,50 @@ result = run_scene(
 )
 print(result.package_uri)
 ```
+
+For an inference profile the routing closure is explicit and fail-closed. The
+caller declares the expected resources, then supplies a loader backed by
+`GetInferenceProfile` in the selected source Region:
+
+```python
+import boto3
+
+from raja_sts import load_bedrock_profile_resources
+
+profile_arn = (
+    "arn:aws:bedrock:us-east-1:123456789012:"
+    "inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+profile_scope = {
+    **scope,
+    "bedrock_model": profile_arn,
+    "bedrock_invoke_resources": [
+        profile_arn,
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+    ],
+}
+bedrock_control = boto3.client("bedrock", region_name="us-east-1")
+result = run_scene(
+    # ...the same arguments as above...
+    scope_spec=profile_scope,
+    bedrock_profile_loader=lambda arn: load_bedrock_profile_resources(bedrock_control, arn),
+)
+```
+
+The compiler rejects unrelated resources, sorts the closure, and requires the
+declared set to exactly match `GetInferenceProfile.models`; missing, stale, or
+extra destinations fail before STS minting. The selected profile Region
+determines the Bedrock Runtime client Region and the selected profile ARN remains
+the reported `modelId`. Supporting ARNs are reported separately as IAM authority
+and are conditioned on the exact selected profile with
+`bedrock:InferenceProfileArn`, so they cannot be invoked directly. This follows
+AWS's [inference-profile IAM guidance](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html).
+Runner-generated policies omit the pinned manifest object's read permission after
+the trusted compiler has resolved it; handlers receive materialized, hash-checked
+inputs and never reread that manifest. The standalone `compile()`/`mint()` default
+retains the manifest read for backward compatibility. This conservative narrowing
+leaves enough of the STS plaintext budget for exact profile closures.
 
 Handlers return bytes or strings plus JSON-serializable invocation metadata.
 The package always includes handler objects, `run/scene.json`, and
@@ -271,16 +321,18 @@ result = run_scene_from_genesis(
 )
 ```
 
-The `bedrock_model` is deliberately supplied by the execution plane and
-recorded in the authority report; it is not derived from the sealed genesis
-package. The trusted bootstrap identity resolves the pinned manifest and reads
-the two control objects by exact version before minting the worker credential.
-Their Quilt hashes are verified. Handlers run in-process as trusted execution
-code: they receive the scoped session that publication later uses, so selector
-and reserved-key checks constrain returned objects but are not a sandbox
-against a handler that makes direct S3 calls or retains the session. The
-low-level `run_scene(manifest_uri, scope_spec, ...)` API remains available
-unchanged.
+The selected `bedrock_model` and optional `bedrock_invoke_resources` are
+deliberately supplied by the execution plane and recorded separately in the
+authority report; they are not derived from the sealed genesis package. A direct
+foundation model needs no explicit resource list. An inference profile requires
+the same complete exact closure shown above. The trusted bootstrap identity
+resolves the pinned manifest and reads the two control objects by exact version
+before minting the worker credential; their Quilt hashes are verified. Handlers
+run in-process as trusted execution code: they receive the scoped session that
+publication later uses, so selector and reserved-key checks constrain returned
+objects but are not a sandbox against a handler that makes direct S3 calls or
+retains the session. The low-level
+`run_scene(manifest_uri, scope_spec, ...)` API remains available unchanged.
 
 ### Command line
 
@@ -332,6 +384,21 @@ pearls scene check \
   --model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
 ```
 
+For an inference profile, `--model-arn` remains the one selected `modelId` and
+`--model-resource-arn` is repeated for every foundation model in the expected IAM
+closure (including a global profile's regionless support ARN). The bootstrap
+identity calls `GetInferenceProfile` in the selected source Region and refuses
+before minting unless the returned destinations match exactly:
+
+```console
+pearls scene check \
+  --genesis 'quilt+s3://quilt-dev#package=proj%2Ftrial001-worker&top_hash=<64 hex characters>' \
+  --role-arn arn:aws:iam::123456789012:role/scene-execution \
+  --model-arn arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0 \
+  --model-resource-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0 \
+  --model-resource-arn arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0
+```
+
 Each reported check names the identity it needed. Checks labeled
 `trusted-bootstrap` used the operator's own read access, because the genesis
 controls must be read before a Scene credential can exist. The command also
@@ -367,9 +434,9 @@ Two boundaries survive the CLI unchanged. The **trusted bootstrap identity**
 reads the pinned manifest and the sealed control objects by exact version before
 minting anything; `--profile` and `--region` apply to those reads and to
 `AssumeRole`, never to the Scene session, which is built only from the minted
-credential and the model ARN's region. The **trusted-handler** boundary is
-unchanged too: verifying the handler's hash proves code identity, not code
-safety. During a run the handler executes in-process and receives the scoped
+credential and the selected model/profile ARN's region. The **trusted-handler**
+boundary is unchanged too: verifying the handler's hash proves code identity,
+not code safety. During a run the handler executes in-process and receives the scoped
 session that publication later uses. Ordering execution after the authority
 checks limits *when* sealed code runs, not what it can do once it runs. The
 command claims no sandboxing and no ambient credential isolation.
@@ -391,6 +458,19 @@ one resource-set allow containing the selected object ARNs. Because S3 version
 IDs uniquely identify stored object versions, using an admitted ID against a
 different key does not return that key. The policy grants no IAM, STS, ACL,
 bucket-policy, or input-write action.
+
+The compiler deliberately does **not** add a blanket Bedrock `Deny` with
+`NotResource` set only to the selected ARN: that would also deny the supporting
+foundation resources Bedrock evaluates for a profile. Instead it emits one exact
+allow for the selected profile and a separate support-resource allow conditioned
+with `StringLike` on `bedrock:InferenceProfileArn`. The value is an exact ARN
+with no wildcard, so a handler cannot invoke a support model directly. The
+declared closure must match the source Region's
+`GetInferenceProfile` response exactly, and every statement counts toward the
+2,048-character STS limit; a closure that cannot fit is refused before minting.
+The base-role/session-policy intersection excludes every resource outside the
+operator inventory and this verified per-Scene closure.
+
 Because a session policy can only narrow its base role, the agent cannot add
 authority during the session. Promotion of output into a later Scene's inputs
 remains separately authorized.
@@ -435,10 +515,12 @@ credentials can see):
 
 STS limits an inline session policy to 2,048 plaintext characters. Exact mode
 uses set-based version-ID and resource lists rather than two statements per
-object, then minifies and measures the JSON before calling AWS. The five-object
-Scene regression compiles to 1,767 characters with all required Quilt metadata
-reads and remains version-pinned. The compiler fails closed with
-`PolicySizeError` when a larger policy does not fit.
+object, then minifies and measures the JSON before calling AWS. Inference-profile
+ARNs and regional support resources are part of that same measured document;
+they never bypass the limit. The five-object foundation-model Scene regression
+compiles below the hard limit with all required Quilt metadata reads and remains
+version-pinned. The compiler fails closed with `PolicySizeError` when a larger
+policy does not fit.
 
 A sealed scope may explicitly set `allow_prefix_fallback` to `true`. The
 compiler then emits common physical S3-prefix resources and reports
@@ -471,13 +553,22 @@ aws cloudformation deploy \
   --parameter-overrides \
     OrchestratorPrincipalArn=arn:aws:iam::123456789012:role/orchestrator \
     ProjectBucketArnPattern=arn:aws:s3:::my-project-* \
-    BedrockModelArn=arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0
+    BedrockInvokeModelArns=arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0,arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
 ```
 
-Review the rendered IAM policy before deployment. `BedrockModelArn` must be the
-same exact foundation-model ARN selected by the sealed Scene scope; a mismatch
-fails closed because the effective permission is the intersection of the base
-role and session policy. The orchestrator needs `sts:AssumeRole` permission as
+`BedrockInvokeModelArns` is a required
+[`CommaDelimitedList`](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/parameters-section-structure.html).
+Each element must
+be an exact commercial-partition foundation-model or account-scoped
+inference-profile ARN; wildcards, custom models, other partitions, and empty
+entries are rejected. A profile inventory must also enumerate every exact
+regional foundation-model ARN that Bedrock can route it to. The base list is an
+operator inventory, not a Scene selection: each sealed Scene still selects one
+model/profile and the effective permission is the intersection of this inventory
+with that Scene's exact session policy. A missing inventory member therefore
+fails closed.
+
+The orchestrator needs `sts:AssumeRole` permission as
 well as the role's trust. The template targets the commercial `aws` partition
 in 0.1.1. `mint(external_id=...)` is available for separately managed roles
 whose trust policy requires `sts:ExternalId`; the shipped same-account template
@@ -497,15 +588,21 @@ reviewed here.
 
 `pearls infra validate` is fully offline. It parses the template, checks any
 supplied values against the template's own `AllowedPattern`s and numeric bounds,
-and checks the consistency the template cannot express, in particular that the
-model ARN's region matches the deployment region:
+and checks the consistency the template cannot express. Every selected profile
+or directly invocable foundation model must match the deployment Region. An
+out-of-Region or regionless foundation ARN is accepted only when its model ID and
+geographic shape can support an admitted profile in the deployment Region.
+Because exact destinations are source-Region and profile specific, this offline
+command does not claim routing membership; `scene check` verifies the per-Scene
+closure against `GetInferenceProfile` before STS minting:
 
 ```console
 pearls infra validate \
   --orchestrator-principal-arn arn:aws:iam::123456789012:user/orchestrator \
   --project-bucket-arn-pattern 'arn:aws:s3:::quilt-dev-*' \
   --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0 \
-  --role-name scene-execution-haiku \
+  --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0 \
+  --role-name scene-execution-model-inventory \
   --region us-east-1 \
   --lint
 ```
@@ -526,46 +623,39 @@ prints `SceneExecutionRoleArn` in a form usable directly as
 reported no-op rather than an error, and a failed or rolled-back deployment exits
 nonzero with the CloudFormation failure reason preserved.
 
-Because one role admits exactly one model, the Trial 001 two-model project needs
-one role per model. `--stack-name` defaults to `--role-name`, so the two cannot
-silently diverge:
+The Trial 001 two-model project can use one role inventory. Repeat
+`--bedrock-model-arn`; the CLI sorts and serializes the values for the
+`CommaDelimitedList`, so argument order does not create a noisy parameter diff:
 
 ```console
 pearls infra deploy \
   --orchestrator-principal-arn arn:aws:iam::123456789012:user/orchestrator \
   --project-bucket-arn-pattern 'arn:aws:s3:::quilt-dev-*' \
   --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0 \
-  --role-name scene-execution-haiku \
-  --region us-east-1 --yes
-
-pearls infra deploy \
-  --orchestrator-principal-arn arn:aws:iam::123456789012:user/orchestrator \
-  --project-bucket-arn-pattern 'arn:aws:s3:::quilt-dev-*' \
   --bedrock-model-arn arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0 \
-  --role-name scene-execution-nova \
+  --role-name scene-execution-trial001 \
   --region us-east-1 --yes
 ```
 
-The orchestrator then needs `sts:AssumeRole` on both roles.
-`pearls infra assume-policy` generates that document from the deployed stacks and
-prints it by default; applying it requires an explicit flag and confirmation, and
-warns that it replaces any existing inline policy of that name:
+The orchestrator now needs `sts:AssumeRole` on that one role.
+`pearls infra assume-policy` generates the document from deployed stacks and
+prints it by default; applying it requires an explicit flag and confirmation,
+and warns that it replaces any existing inline policy of that name:
 
 ```console
 pearls infra assume-policy \
-  --from-stack scene-execution-haiku \
-  --from-stack scene-execution-nova
+  --from-stack scene-execution-trial001
 
 pearls infra assume-policy \
-  --from-stack scene-execution-haiku \
-  --from-stack scene-execution-nova \
+  --from-stack scene-execution-trial001 \
   --apply-to-user orchestrator --yes
 ```
 
-`pearls infra status --stack-name scene-execution-haiku` reports the stack
-status, its parameters, and the drift-relevant identity (role ARN, admitted model
-ARN, bucket pattern, maximum session duration) so an operator can confirm a role
-still matches the Scene they intend to run.
+`pearls infra status --stack-name scene-execution-trial001` reports the stack
+status, parameters, and drift-relevant identity: role ARN, complete admitted
+Bedrock resource list, bucket pattern, and maximum session duration. Plan,
+deploy, no-op, and status JSON expose the inventory as a logical list even
+though the CloudFormation API transports it as one comma-delimited string.
 
 Three limits are reported by the commands themselves rather than papered over.
 Bedrock account-level model access cannot be provisioned by this template and

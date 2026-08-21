@@ -8,7 +8,9 @@ def test_base_role_is_admin_applied_and_session_policy_ready() -> None:
     assert "sts:AssumeRole" in template
     assert "s3:GetObjectVersion" in template
     assert "s3:PutObject" in template
-    assert "BedrockModelArn" in template
+    assert "BedrockInvokeModelArns" in template
+    assert "Type: CommaDelimitedList" in template
+    assert "BedrockModelArn" not in template
     assert "bedrock:InvokeModel" in template
     assert "bedrock:*" not in template
     assert "s3:DeleteObject" not in template
@@ -42,7 +44,7 @@ def test_documented_deployment_supplies_every_required_role_parameter() -> None:
 
     assert "OrchestratorPrincipalArn=" in deploy
     assert "ProjectBucketArnPattern=" in deploy
-    assert "BedrockModelArn=arn:aws:bedrock:" in deploy
+    assert "BedrockInvokeModelArns=arn:aws:bedrock:" in deploy
 
 
 def test_documented_cli_deployment_covers_the_two_model_trial_example() -> None:
@@ -52,7 +54,7 @@ def test_documented_cli_deployment_covers_the_two_model_trial_example() -> None:
 
     assert "--orchestrator-principal-arn" in deploy
     assert "--project-bucket-arn-pattern" in deploy
-    assert "--bedrock-model-arn arn:aws:bedrock:" in deploy
+    assert deploy.count("--bedrock-model-arn arn:aws:bedrock:") >= 2
     assert "--role-name" in deploy
     assert "--yes" in deploy
     assert "assume-policy" in readme

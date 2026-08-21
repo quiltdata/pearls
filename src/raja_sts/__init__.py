@@ -1,5 +1,6 @@
 """AWS-native minimum-viable TAJ compiler and bounded Scene runner."""
 
+from .bedrock import BedrockInvocation, BedrockProfileLoader, load_bedrock_profile_resources
 from .errors import (
     AuthorityModeError,
     HandlerContractError,
@@ -40,6 +41,8 @@ from .workflows import resolve_workflow_stamp
 __all__ = [
     "SEALED_HANDLER_KEY",
     "AuthorityModeError",
+    "BedrockInvocation",
+    "BedrockProfileLoader",
     "CompiledPolicy",
     "GenesisPreflight",
     "HandlerContractError",
@@ -64,6 +67,7 @@ __all__ = [
     "SealedSource",
     "WorkflowContractError",
     "compile",
+    "load_bedrock_profile_resources",
     "load_sealed_handler",
     "mint",
     "mint_compiled",

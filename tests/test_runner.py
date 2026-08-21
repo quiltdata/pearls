@@ -541,9 +541,21 @@ def test_run_scene_from_genesis_derives_prompt_read_and_write_scope() -> None:
         {"Bucket": "input-bucket", "Key": "sealed/prompt.txt", "VersionId": "input-version"}
     ]
     policy = json.loads(sts.requests[0]["Policy"])
-    write = policy["Statement"][-1]["Resource"]
-    assert "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write
-    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write
+    write_boundary = next(
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Effect") == "Deny" and statement.get("Action") == "s3:PutObject"
+    )
+    assert (
+        "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write_boundary["NotResource"]
+    )
+    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write_boundary["NotResource"]
+    write_allow = next(
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Effect") == "Allow" and statement.get("Action") == "s3:PutObject"
+    )
+    assert write_allow["Resource"] == "*"
     assert result.output_package.name == "project/scene-output"
 
 
@@ -634,3 +646,91 @@ def test_run_scene_threads_output_meta_message_into_manifest_header() -> None:
     assert header["user_meta"] == {"trial": 1, "limitations": "offline test"}
     assert header["message"] == "threaded through"
     assert "workflow" not in header
+
+
+PROFILE_ARN = (
+    "arn:aws:bedrock:us-east-1:123456789012:"
+    "inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_EAST = (
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_WEST = (
+    "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+
+
+def test_run_scene_uses_selected_profile_for_model_id_region_and_report() -> None:
+    contexts: list[SceneContext] = []
+
+    def handler(
+        inputs: Mapping[str, Any], session: FakeSession, context: SceneContext
+    ) -> SceneHandlerResult:
+        contexts.append(context)
+        session.client("bedrock-runtime").converse(
+            modelId=context.bedrock_model_id,
+            messages=[],
+        )
+        return SceneHandlerResult({"result.txt": "ok"}, {"model": context.bedrock_model_id})
+
+    scope = _scope(model=PROFILE_ARN)
+    scope["bedrock_invoke_resources"] = [
+        PROFILE_MODEL_WEST,
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST,
+    ]
+    _result, _events, s3, sts, session, session_kwargs = _execute(
+        handler=handler,
+        scope=scope,
+        bedrock_profile_loader=lambda arn: (
+            (
+                PROFILE_MODEL_EAST,
+                PROFILE_MODEL_WEST,
+            )
+            if arn == PROFILE_ARN
+            else ()
+        ),
+    )
+
+    assert session_kwargs["region_name"] == "us-east-1"
+    assert session.bedrock.requests[0]["modelId"] == PROFILE_ARN
+    assert contexts[0].bedrock_model_id == PROFILE_ARN
+    assert contexts[0].bedrock_model_arn == PROFILE_ARN
+    assert contexts[0].bedrock_invoke_resources == (
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST,
+        PROFILE_MODEL_WEST,
+    )
+    policy = json.loads(sts.requests[0]["Policy"])
+    model_statements = [
+        statement
+        for statement in policy["Statement"]
+        if statement.get("Action") == "bedrock:InvokeModel"
+    ]
+    assert model_statements == [
+        {
+            "Action": "bedrock:InvokeModel",
+            "Effect": "Allow",
+            "Resource": PROFILE_ARN,
+        },
+        {
+            "Action": "bedrock:InvokeModel",
+            "Condition": {
+                "StringLike": {
+                    "bedrock:InferenceProfileArn": PROFILE_ARN,
+                }
+            },
+            "Effect": "Allow",
+            "Resource": [PROFILE_MODEL_EAST, PROFILE_MODEL_WEST],
+        },
+    ]
+    scene_put = next(
+        request for request in s3.put_requests if request["Key"].endswith("run/scene.json")
+    )
+    authority = json.loads(scene_put["Body"])["authority"]
+    assert authority["bedrock"]["selected_model_id"] == PROFILE_ARN
+    assert authority["bedrock"]["invoke_resources"] == [
+        PROFILE_ARN,
+        PROFILE_MODEL_EAST,
+        PROFILE_MODEL_WEST,
+    ]

@@ -11,6 +11,7 @@ from typing import Any
 import boto3
 from quilt3 import checksums
 
+from .bedrock import BedrockInvocation, BedrockProfileLoader, bedrock_model_region
 from .errors import (
     AuthorityModeError,
     HandlerContractError,
@@ -46,12 +47,27 @@ class SceneContext:
     control_prompt: str | None = None
 
     @property
-    def bedrock_model_arn(self) -> str:
-        """Return the exact model selected by the sealed scope."""
-        model = self.compilation.bedrock_model_arn
-        if model is None:  # The runner rejects this before constructing a context.
+    def bedrock_invocation(self) -> BedrockInvocation:
+        """Return the selected Bedrock identifier and exact IAM resource closure."""
+        invocation = self.compilation.bedrock_invocation
+        if invocation is None:  # The runner rejects this before constructing a context.
             raise AuthorityModeError("Scene scope does not select a Bedrock model")
-        return model
+        return invocation
+
+    @property
+    def bedrock_model_id(self) -> str:
+        """Return the exact modelId selected by the sealed Scene scope."""
+        return self.bedrock_invocation.selected_model_id
+
+    @property
+    def bedrock_model_arn(self) -> str:
+        """Return the selected modelId (compatibility alias for ``bedrock_model_id``)."""
+        return self.bedrock_model_id
+
+    @property
+    def bedrock_invoke_resources(self) -> tuple[str, ...]:
+        """Return every exact IAM resource needed for the selected invocation."""
+        return self.bedrock_invocation.invoke_resources
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,17 +236,20 @@ def _iso8601(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _model_region(model_arn: str) -> str:
-    return model_arn.split(":", 5)[3]
-
-
-def _validate_runner_authority(compilation: CompiledPolicy) -> None:
+def _validate_runner_authority(compilation: CompiledPolicy) -> BedrockInvocation:
     if compilation.mode != "per-object-version":
         raise AuthorityModeError(
             f"Scene runner requires per-object-version authority, got {compilation.mode!r}"
         )
-    if compilation.bedrock_model_arn is None:
-        raise AuthorityModeError("Scene runner requires one exact bedrock_model resource")
+    try:
+        invocation = compilation.bedrock_invocation
+    except InvalidScopeError as error:
+        raise AuthorityModeError(
+            f"Scene runner received invalid Bedrock authority: {error}"
+        ) from error
+    if invocation is None:
+        raise AuthorityModeError("Scene runner requires one exact bedrock_model selection")
+    return invocation
 
 
 def _execute_compiled_scene(
@@ -250,7 +269,7 @@ def _execute_compiled_scene(
     output_message: str | None = None,
     output_workflow: str | None | object = ...,
 ) -> SceneRunResult:
-    _validate_runner_authority(compilation)
+    invocation = _validate_runner_authority(compilation)
     credentials = mint_compiled(
         compilation,
         role_arn=role_arn,
@@ -259,11 +278,8 @@ def _execute_compiled_scene(
         external_id=external_id,
         sts_client=sts_client,
     )
-    model_arn = compilation.bedrock_model_arn
-    if model_arn is None:  # Narrowed by _validate_runner_authority.
-        raise AuthorityModeError("Scene runner requires one exact bedrock_model resource")
     session = session_factory(
-        region_name=_model_region(model_arn),
+        region_name=bedrock_model_region(invocation.selected_model_id),
         **credentials.boto3_kwargs(),
     )
     s3_client = session.client("s3")
@@ -345,6 +361,7 @@ def run_scene(
     duration_seconds: int = 3600,
     external_id: str | None = None,
     manifest_loader: ManifestLoader | None = None,
+    bedrock_profile_loader: BedrockProfileLoader | None = None,
     sts_client: Any | None = None,
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
     session_factory: Callable[..., Any] = boto3.Session,
@@ -366,6 +383,8 @@ def run_scene(
         scope_spec,
         manifest_loader=manifest_loader,
         max_policy_characters=max_policy_characters,
+        include_manifest_read=False,
+        bedrock_profile_loader=bedrock_profile_loader,
     )
     return _execute_compiled_scene(
         compilation=compilation,
@@ -434,6 +453,8 @@ def preflight_genesis(
     genesis_uri: str,
     *,
     bedrock_model: str,
+    bedrock_invoke_resources: Sequence[str] | None = None,
+    bedrock_profile_loader: BedrockProfileLoader | None = None,
     manifest_loader: ManifestLoader | None = None,
     genesis_s3_client: Any | None = None,
     max_policy_characters: int = DEFAULT_MAX_POLICY_CHARACTERS,
@@ -457,16 +478,21 @@ def preflight_genesis(
     except UnicodeDecodeError as error:
         raise ManifestLoadError("Genesis README.md must be UTF-8 text") from error
     writable = _parse_outputs_json(read_manifest_object(control_client, by_key["outputs.json"]))
+    scope: dict[str, object] = {
+        "readable": ["input/"],
+        "writable": writable,
+        "bedrock_model": bedrock_model,
+        "require_version_ids": True,
+    }
+    if bedrock_invoke_resources is not None:
+        scope["bedrock_invoke_resources"] = tuple(bedrock_invoke_resources)
     compilation = compile(
         genesis_uri,
-        {
-            "readable": ["input/"],
-            "writable": writable,
-            "bedrock_model": bedrock_model,
-            "require_version_ids": True,
-        },
+        scope,
         manifest_loader=lambda _: objects,
         max_policy_characters=max_policy_characters,
+        include_manifest_read=False,
+        bedrock_profile_loader=bedrock_profile_loader,
     )
     return GenesisPreflight(
         genesis=genesis,
@@ -485,6 +511,8 @@ def run_scene_from_genesis(
     scene_id: str,
     handler: SceneHandler,
     bedrock_model: str,
+    bedrock_invoke_resources: Sequence[str] | None = None,
+    bedrock_profile_loader: BedrockProfileLoader | None = None,
     duration_seconds: int = 3600,
     external_id: str | None = None,
     manifest_loader: ManifestLoader | None = None,
@@ -507,6 +535,8 @@ def run_scene_from_genesis(
     preflight = preflight_genesis(
         genesis_uri,
         bedrock_model=bedrock_model,
+        bedrock_invoke_resources=bedrock_invoke_resources,
+        bedrock_profile_loader=bedrock_profile_loader,
         manifest_loader=manifest_loader,
         genesis_s3_client=genesis_s3_client,
         max_policy_characters=max_policy_characters,

@@ -21,6 +21,17 @@ TOP_HASH = "b" * 64
 GENESIS_URI = f"quilt+s3://genesis-bucket#package=proj%2Ftrial001-worker&top_hash={TOP_HASH}"
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution-haiku"
 MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+SECOND_MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+PROFILE_ARN = (
+    "arn:aws:bedrock:us-east-1:123456789012:"
+    "inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_EAST_ARN = (
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
+PROFILE_MODEL_WEST_ARN = (
+    "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+)
 ORCHESTRATOR_ARN = "arn:aws:iam::123456789012:user/orchestrator"
 BUCKET_PATTERN = "arn:aws:s3:::quilt-dev-*"
 INPUT_CONTENT = b"Assess the trial output against the rubric."
@@ -208,6 +219,26 @@ class FakeSTS:
             },
             "PackedPolicySize": 31,
         }
+
+
+class FakeBedrockControl:
+    """Read-only Bedrock control-plane profile resolver."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.response: dict[str, Any] = {
+            "inferenceProfileArn": PROFILE_ARN,
+            "status": "ACTIVE",
+            "type": "SYSTEM_DEFINED",
+            "models": [
+                {"modelArn": PROFILE_MODEL_EAST_ARN},
+                {"modelArn": PROFILE_MODEL_WEST_ARN},
+            ],
+        }
+
+    def get_inference_profile(self, **kwargs: Any) -> dict[str, Any]:
+        self.requests.append(kwargs)
+        return self.response
 
 
 class FakeSession:
