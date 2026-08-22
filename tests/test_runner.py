@@ -331,7 +331,12 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     ("scope", "loader", "message"),
     [
         (_scope(model=None), None, "bedrock_model"),
-        (_scope(require_versions=False), _loader([], version_id=None), "per-object-version"),
+        (
+            _scope(require_versions=False),
+            _loader([], version_id=None),
+            "version ID or content hash",
+        ),
+        (_scope(), _loader([], hash_type="unknown"), "unsupported Quilt content hash"),
     ],
 )
 def test_runner_rejects_weakened_authority_before_mint(
@@ -374,7 +379,6 @@ def test_runner_rejects_missing_hash_before_read() -> None:
         (FakeS3([], content=b"changed"), None, "hash mismatch"),
         (FakeS3([], returned_version="wrong"), None, "wrong version"),
         (FakeS3([], content="not-a-body"), None, "Unable to read"),
-        (FakeS3([]), _loader([], hash_type="unknown"), "Unsupported Quilt"),
     ],
 )
 def test_runner_fails_closed_on_input_integrity(
@@ -624,21 +628,18 @@ def test_run_scene_from_genesis_derives_prompt_read_and_write_scope() -> None:
         {"Bucket": "input-bucket", "Key": "sealed/prompt.txt", "VersionId": "input-version"}
     ]
     policy = json.loads(sts.requests[0]["Policy"])
-    write_boundary = next(
-        statement
-        for statement in policy["Statement"]
-        if statement.get("Effect") == "Deny" and statement.get("Action") == "s3:PutObject"
-    )
-    assert (
-        "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write_boundary["NotResource"]
-    )
-    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write_boundary["NotResource"]
     write_allow = next(
+        statement for statement in policy["Statement"] if statement.get("Action") == "s3:PutObject"
+    )
+    assert "arn:aws:s3:::output-bucket/project/scene-output/result/*" in write_allow["Resource"]
+    assert "arn:aws:s3:::output-bucket/project/scene-output/*" not in write_allow["Resource"]
+    prefix_read = next(
         statement
         for statement in policy["Statement"]
-        if statement.get("Effect") == "Allow" and statement.get("Action") == "s3:PutObject"
+        if statement.get("Action") == ["s3:GetObject", "s3:GetObjectVersion"]
     )
-    assert write_allow["Resource"] == "*"
+    assert prefix_read["Resource"] == ["arn:aws:s3:::input-bucket/sealed/*"]
+    assert not any(statement["Effect"] == "Deny" for statement in policy["Statement"])
     assert result.output_package.name == "project/scene-output"
 
 

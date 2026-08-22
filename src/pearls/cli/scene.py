@@ -75,6 +75,13 @@ UNPROVEN_CONDITIONS: tuple[str, ...] = (
     "import-time/native initialization, and callable binding remain unproven. During "
     "a run the handler executes in-process as trusted code and receives the scoped "
     "session that publication later uses.",
+    "The Scene credential is prefix-scoped for input reads and can read objects under "
+    "the reported source prefixes that are not selected by the manifest scope. The "
+    "runner requests each selected object by exact VersionId and verifies its Quilt "
+    "hash, but this preflight does not prove the absence of extra reads.",
+    "The packed STS session-policy budget is undocumented and cannot be calculated "
+    "without calling AssumeRole. This preflight verifies plaintext shape and size but "
+    "does not prove that AWS will accept the compressed policy.",
     "quilt3 manifest retrieval does not verify downloaded manifest bytes against "
     "the requested top hash (quiltdata/quilt#5181), so the genesis top hash is "
     "provenance, not tamper enforcement.",
@@ -384,6 +391,12 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
     )
     compilation = preflight.compilation
     record(
+        "input-integrity-enforcement-admitted",
+        _LOCAL,
+        f"{len(compilation.selected_objects)} selected descriptor(s) will be read by exact "
+        "VersionId and verified against their declared Quilt hashes before handler execution",
+    )
+    record(
         "output-selectors",
         _BOOTSTRAP,
         f"{len(compilation.writable_selectors)} write selector(s) targeting "
@@ -407,8 +420,8 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
     record(
         "session-policy-compiled",
         _LOCAL,
-        f"{compilation.mode} authority in {compilation.size} of "
-        f"{DEFAULT_MAX_POLICY_CHARACTERS} characters",
+        f"{compilation.mode} authority; {compilation.size} serialized characters; "
+        f"{len(compilation.read_prefixes)} source prefix(es)",
     )
 
     payload = envelope(SCENE_CHECK_SCHEMA, "ok")

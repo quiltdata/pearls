@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from .bedrock import BedrockInvocation
 
-PolicyMode = Literal["per-object-version", "per-object", "mixed", "per-prefix"]
+PolicyMode = Literal["prefix-scoped"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +145,7 @@ class CompiledPolicy:
     bedrock_model_arn: str | None = None
     writable_selectors: tuple[OutputSelector, ...] = ()
     bedrock_invoke_resources: tuple[str, ...] = ()
+    read_prefixes: tuple[str, ...] = ()
 
     @property
     def size(self) -> int:
@@ -174,12 +175,15 @@ class CompiledPolicy:
             "mode": self.mode,
             "policy_size": self.size,
             "readable_selectors": list(self.readable_selectors),
+            "read_prefixes": list(self.read_prefixes),
+            "input_integrity_requirement": "runner-exact-version-and-quilt-hash",
             "selected_objects": [
                 {
                     "logical_key": item.logical_key,
                     "bucket": item.bucket,
                     "key": item.key,
                     "version_id": item.version_id,
+                    "quilt_hash": {"type": item.hash_type, "value": item.hash_value},
                 }
                 for item in self.selected_objects
             ],

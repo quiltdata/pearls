@@ -126,7 +126,11 @@ def test_check_passes_and_reports_non_secret_authority() -> None:
     assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-scene-check/v2"
     assert payload["status"] == "ok"
     assert payload["genesis"]["top_hash"] == TOP_HASH
-    assert payload["authority"]["mode"] == "per-object-version"
+    assert payload["authority"]["mode"] == "prefix-scoped"
+    assert payload["authority"]["read_prefixes"] == ["arn:aws:s3:::genesis-bucket/genesis/input/*"]
+    assert payload["authority"]["input_integrity_requirement"] == (
+        "runner-exact-version-and-quilt-hash"
+    )
     assert payload["authority"]["bedrock_model_arn"] == MODEL_ARN
     assert payload["authority"]["output_revision_id"] == payload["scene_id"]
     assert payload["handler"]["logical_key"] == "protocol/handler.py"
@@ -238,6 +242,7 @@ def test_check_labels_which_checks_needed_the_trusted_bootstrap_identity() -> No
     assert by_name["argument-shapes"] == "local"
     assert by_name["model-selection-exact"] == "local"
     assert by_name["model-authority-exact"] == "local"
+    assert by_name["input-integrity-enforcement-admitted"] == "local"
     assert by_name["session-policy-compiled"] == "local"
 
 
@@ -254,6 +259,9 @@ def test_check_states_what_it_cannot_prove_including_bedrock_model_access() -> N
     assert "declaration completeness" in stdout
     assert "No AssumeRole, model invocation, or write was performed" in stdout
     assert "no byte of the sealed handler was executed" in stdout
+    assert "prefix-scoped for input reads" in stdout
+    assert "does not prove the absence of extra reads" in stdout
+    assert "packed STS session-policy budget is undocumented" in stdout
 
 
 def test_check_human_output_summarizes_authority() -> None:
@@ -267,7 +275,7 @@ def test_check_human_output_summarizes_authority() -> None:
     assert "pass  sealed-handler-verified (trusted-bootstrap)" in stdout
     assert "runtime requirements" in stdout
     assert "authority mode" in stdout
-    assert "per-object-version" in stdout
+    assert "prefix-scoped" in stdout
     assert "proj/trial001-worker-output@output-bucket" in stdout
 
 

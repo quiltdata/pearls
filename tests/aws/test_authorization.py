@@ -318,11 +318,12 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
             scoped_s3.get_object,
             **denied_read,
         )
-        _expect_denied(
+        wrong = _get_and_close(scoped_s3, wrong_version)
+        _record(
             transcript,
-            "GetObject:wrong-version",
-            scoped_s3.get_object,
-            **wrong_version,
+            "GetObject:wrong-version-inside-prefix",
+            "allowed",
+            _response_details(wrong),
         )
         _expect_missing(
             transcript,
@@ -330,12 +331,15 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
             scoped_s3.get_object,
             **cross_object_version,
         )
-        _expect_denied(
+        current = _get_and_close(
+            scoped_s3,
+            {"Bucket": allowed_read["Bucket"], "Key": allowed_read["Key"]},
+        )
+        _record(
             transcript,
-            "GetObject:selected-current-version",
-            scoped_s3.get_object,
-            Bucket=allowed_read["Bucket"],
-            Key=allowed_read["Key"],
+            "GetObject:selected-current-version-inside-prefix",
+            "allowed",
+            _response_details(current),
         )
         for operation, target in (
             (

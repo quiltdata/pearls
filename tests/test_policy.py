@@ -26,59 +26,45 @@ def _actions(policy: dict[str, object]) -> set[str]:
     return actions
 
 
-def test_compile_maps_logical_scope_to_exact_versioned_resources(
+def test_compile_maps_logical_scope_to_source_prefixes(
     manifest_loader, scope_spec: dict[str, object]
 ) -> None:
     result = compile(MANIFEST_URI, scope_spec, manifest_loader=manifest_loader)
 
-    assert result.mode == "per-object-version"
+    assert result.mode == "prefix-scoped"
+    assert result.read_prefixes == (
+        "arn:aws:s3:::control-bucket/scenes/*",
+        "arn:aws:s3:::input-bucket/sealed/*",
+    )
     assert [item.logical_key for item in result.selected_objects] == [
         "input-content/data.csv",
         "input-content/notes.txt",
         "input-control/worker.json",
     ]
     assert "supervisor" not in result.policy_json
-    assert "rubric" not in result.policy_json
+    assert "version-data" not in result.policy_json
+    assert "sealed/data.csv" not in result.policy_json
     assert result.policy_json == json.dumps(result.document, separators=(",", ":"), sort_keys=True)
     assert result.size <= 2048
-    assert result.warnings == ()
 
     statements = result.document["Statement"]
-    reads = [
-        item for item in statements if item["Effect"] == "Allow" and "Get" in str(item["Action"])
-    ]
-    assert len(reads) == 3
-    versioning_read = next(item for item in reads if item["Action"] == "s3:GetBucketVersioning")
-    assert versioning_read == {
+    assert not any(item["Effect"] == "Deny" for item in statements)
+    prefix_read = next(item for item in statements if isinstance(item["Action"], list))
+    assert prefix_read == {
         "Effect": "Allow",
-        "Action": "s3:GetBucketVersioning",
-        "Resource": "arn:aws:s3:::output-bucket",
+        "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+        "Resource": list(result.read_prefixes),
     }
-    version_read = next(item for item in reads if item["Action"] == "s3:GetObjectVersion")
-    assert version_read["Resource"] == [
-        "arn:aws:s3:::input-bucket/sealed/data.csv",
-        "arn:aws:s3:::input-bucket/sealed/notes.txt",
-        "arn:aws:s3:::control-bucket/scenes/worker.json",
+    metadata_read = next(item for item in statements if item["Action"] == "s3:GetObject")
+    assert metadata_read["Resource"] == [
+        f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
+        "arn:aws:s3:::output-bucket/.quilt/workflows/*",
+        "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
     ]
-    assert "Condition" not in version_read
-    metadata_read = next(item for item in reads if item["Action"] == "s3:GetObject")
-    # The exact NotResource deny below bounds this compact wildcard allow.
-    assert metadata_read["Resource"] == "*"
-    wrong_version_denies = [
-        item
-        for item in statements
-        if item["Effect"] == "Deny" and "StringNotEquals" in item.get("Condition", {})
-    ]
-    assert len(wrong_version_denies) == 1
-    assert wrong_version_denies[0]["Resource"] == "*"
-    assert wrong_version_denies[0]["Condition"]["StringNotEquals"]["s3:VersionId"] == [
-        "version-data",
-        "version-notes",
-        "version-worker",
-    ]
+    assert result.report()["input_integrity_requirement"] == ("runner-exact-version-and-quilt-hash")
 
 
-def test_runner_revision_read_is_exact_and_deny_bounded(
+def test_runner_revision_metadata_read_is_exact(
     manifest_loader, scope_spec: dict[str, object]
 ) -> None:
     result = compile(
@@ -90,29 +76,25 @@ def test_runner_revision_read_is_exact_and_deny_bounded(
 
     assert result.output_package.revision_id == "scene-123"
     assert result.report()["output_revision_id"] == "scene-123"
-    read_boundary = next(
+    metadata_read = next(
         statement
         for statement in result.document["Statement"]
-        if statement.get("Effect") == "Deny" and statement.get("Action") == "s3:GetObject"
+        if statement.get("Action") == "s3:GetObject"
     )
-    assert read_boundary["NotResource"] == [
+    assert metadata_read["Resource"] == [
         f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
         "arn:aws:s3:::output-bucket/.quilt/workflows/*",
         "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
         "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/scene-123",
     ]
     assert not any(
-        resource.endswith("/project/scene-output/*") for resource in read_boundary["NotResource"]
+        resource.endswith("/project/scene-output/*") for resource in metadata_read["Resource"]
     )
-    current_allow = next(
-        statement
-        for statement in result.document["Statement"]
-        if statement.get("Effect") == "Allow" and statement.get("Action") == "s3:GetObject"
-    )
-    assert current_allow["Resource"] == "*"
 
 
-def test_five_object_scene_stays_exact_and_under_sts_limit(manifest_loader) -> None:
+def test_many_object_scene_policy_is_constant_size_per_source_registry(
+    manifest_loader,
+) -> None:
     result = compile(
         MANIFEST_URI,
         {
@@ -123,74 +105,32 @@ def test_five_object_scene_stays_exact_and_under_sts_limit(manifest_loader) -> N
         manifest_loader=manifest_loader,
     )
 
-    assert result.mode == "per-object-version"
+    assert result.mode == "prefix-scoped"
     assert len(result.selected_objects) == 5
-    assert result.size == 1359
-    version_denies = [
-        statement
-        for statement in result.document["Statement"]
-        if statement.get("Condition", {}).get("StringNotEquals")
-    ]
-    assert len(version_denies) == 1
-    assert version_denies[0]["Resource"] == "*"
-    assert set(version_denies[0]["Condition"]["StringNotEquals"]["s3:VersionId"]) == {
-        "version-data",
-        "version-notes",
-        "version-worker",
-        "version-supervisor",
-        "version-secret",
-    }
-    version_allows = [
-        statement
-        for statement in result.document["Statement"]
-        if statement["Effect"] == "Allow" and statement["Action"] == "s3:GetObjectVersion"
-    ]
-    assert len(version_allows) == 1
-    assert len(version_allows[0]["Resource"]) == 5
+    assert result.read_prefixes == (
+        "arn:aws:s3:::control-bucket/*",
+        "arn:aws:s3:::input-bucket/sealed/*",
+    )
+    assert not any(item.version_id in result.policy_json for item in result.selected_objects)
+    assert not any(item.arn in result.policy_json for item in result.selected_objects)
 
 
-def test_compile_allows_only_put_in_output_namespaces_and_explicitly_denies_bypass(
+def test_compile_allows_only_declared_resources_without_broad_denies(
     manifest_loader, scope_spec: dict[str, object]
 ) -> None:
     result = compile(MANIFEST_URI, scope_spec, manifest_loader=manifest_loader)
     statements = result.document["Statement"]
-    global_deny, read_boundary, write_boundary = statements[:3]
-    write = statements[-1]
 
-    assert global_deny == {
-        "Effect": "Deny",
-        "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
-        "Resource": "*",
-    }
-    assert read_boundary == {
-        "Effect": "Deny",
-        "Action": "s3:GetObject",
-        "NotResource": [
-            f"arn:aws:s3:::manifest-bucket/.quilt/packages/{TOP_HASH}",
-            "arn:aws:s3:::output-bucket/.quilt/workflows/*",
-            "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/latest",
-        ],
-    }
-    assert write_boundary == {
-        "Effect": "Deny",
-        "Action": "s3:PutObject",
-        "NotResource": [
-            "arn:aws:s3:::output-bucket/project/scene-output/*",
-            "arn:aws:s3:::output-bucket/.quilt/packages/*",
-            "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/*",
-        ],
-    }
-    # The exact NotResource deny and IAM deny precedence keep the wildcard
-    # allow's effective write set equal to this declared output boundary.
+    assert not any(statement["Effect"] == "Deny" for statement in statements)
+    write = next(statement for statement in statements if statement["Action"] == "s3:PutObject")
     assert write == {
         "Effect": "Allow",
         "Action": "s3:PutObject",
-        "Resource": "*",
+        "Resource": list(result.output_package.write_resources),
     }
     allowed_actions = {
         action
         for statement in statements
-        if statement["Effect"] == "Allow"
         for action in (
             statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
         )
@@ -250,17 +190,12 @@ def test_unversioned_read_is_reported_honestly(manifest_loader) -> None:
         },
         manifest_loader=add_unversioned,
     )
-    assert result.mode == "per-object"
-    allowed_reads = [
-        statement
-        for statement in result.document["Statement"]
-        if statement["Effect"] == "Allow" and statement["Action"] == "s3:GetObject"
-    ]
-    assert len(allowed_reads) == 1
-    assert "pins their keys but not their bytes" in result.warnings[0]
+    assert result.mode == "prefix-scoped"
+    assert result.read_prefixes == ("arn:aws:s3:::input-bucket/legacy/*",)
+    assert any("Scene runner will refuse" in warning for warning in result.warnings)
 
 
-def test_mixed_version_mode_and_required_versions(manifest_loader) -> None:
+def test_single_mode_still_requires_versions_when_requested(manifest_loader) -> None:
     def add_unversioned(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
         return (
             *manifest_loader(manifest),
@@ -271,7 +206,9 @@ def test_mixed_version_mode_and_required_versions(manifest_loader) -> None:
         "readable": ["input-content/data.csv", "legacy/data"],
         "writable_package": "project/output@output-bucket",
     }
-    assert compile(MANIFEST_URI, scope, manifest_loader=add_unversioned).mode == "mixed"
+    compiled = compile(MANIFEST_URI, scope, manifest_loader=add_unversioned)
+    assert compiled.mode == "prefix-scoped"
+    assert compiled.read_prefixes == ("arn:aws:s3:::input-bucket/*",)
     scope["require_version_ids"] = True
     with pytest.raises(InvalidScopeError, match="legacy/data"):
         compile(MANIFEST_URI, scope, manifest_loader=add_unversioned)
@@ -317,43 +254,52 @@ def _large_loader(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
     )
 
 
-def test_policy_size_fails_closed_without_authorized_fallback() -> None:
-    with pytest.raises(PolicySizeError, match="prefix fallback was not authorized"):
-        compile(
-            MANIFEST_URI,
-            {
-                "readable": ["input/"],
-                "writable_package": "project/output@output-bucket",
-            },
-            manifest_loader=_large_loader,
-        )
-
-
-def test_explicit_prefix_fallback_reports_degraded_authority() -> None:
-    result = compile(
+def test_policy_size_is_constant_in_selected_object_count() -> None:
+    many = compile(
         MANIFEST_URI,
         {
             "readable": ["input/"],
             "writable_package": "project/output@output-bucket",
-            "allow_prefix_fallback": True,
         },
         manifest_loader=_large_loader,
     )
-    assert result.mode == "per-prefix"
-    assert "arn:aws:s3:::large-input-bucket/sealed/input/*" in result.policy_json
-    assert len(result.warnings) == 3
-    assert "widens" in result.warnings[0]
-    assert result.size <= 2048
+
+    def one_loader(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
+        return _large_loader(manifest)[:1]
+
+    one = compile(
+        MANIFEST_URI,
+        {
+            "readable": ["input/"],
+            "writable_package": "project/output@output-bucket",
+        },
+        manifest_loader=one_loader,
+    )
+    assert len(many.selected_objects) == 30
+    assert one.size == many.size
+    assert one.read_prefixes == many.read_prefixes
 
 
-def test_prefix_policy_can_also_exceed_a_smaller_caller_limit() -> None:
-    with pytest.raises(PolicySizeError, match="prefix session policy"):
+def test_removed_prefix_fallback_is_rejected_as_an_unknown_scope_field() -> None:
+    with pytest.raises(InvalidScopeError, match="allow_prefix_fallback"):
         compile(
             MANIFEST_URI,
             {
                 "readable": ["input/"],
                 "writable_package": "project/output@output-bucket",
                 "allow_prefix_fallback": True,
+            },
+            manifest_loader=_large_loader,
+        )
+
+
+def test_prefix_policy_can_exceed_a_smaller_caller_plaintext_limit() -> None:
+    with pytest.raises(PolicySizeError, match="plaintext limit"):
+        compile(
+            MANIFEST_URI,
+            {
+                "readable": ["input/"],
+                "writable_package": "project/output@output-bucket",
             },
             manifest_loader=_large_loader,
             max_policy_characters=100,
@@ -477,9 +423,12 @@ def test_compile_accepts_narrow_uri_write_selectors(manifest_loader) -> None:
         "arn:aws:s3:::output-bucket/.quilt/packages/*",
         "arn:aws:s3:::output-bucket/.quilt/named_packages/project/scene-output/*",
     ]
-    write_boundary = result.document["Statement"][2]
-    assert write_boundary["NotResource"] == list(result.output_package.resources)
-    assert result.document["Statement"][-1]["Resource"] == "*"
+    write = next(
+        statement
+        for statement in result.document["Statement"]
+        if statement["Action"] == "s3:PutObject"
+    )
+    assert write["Resource"] == list(result.output_package.resources)
     assert [item["kind"] for item in result.report()["writable_selectors"]] == [
         "subtree",
         "object",
@@ -606,7 +555,7 @@ def test_inference_profile_closure_counts_toward_the_sts_plaintext_limit(
         bedrock_profile_loader=_profile_loader,
     )
 
-    with pytest.raises(PolicySizeError, match="prefix fallback was not authorized"):
+    with pytest.raises(PolicySizeError, match="plaintext limit"):
         compile(
             MANIFEST_URI,
             scope,

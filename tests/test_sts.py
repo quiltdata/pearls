@@ -6,7 +6,14 @@ from typing import Any
 import pytest
 from conftest import MANIFEST_URI
 
-from pearls import InvalidAssumeRoleRequest, MintError, compile, mint, mint_compiled
+from pearls import (
+    InvalidAssumeRoleRequest,
+    MintError,
+    PackedPolicyTooLargeError,
+    compile,
+    mint,
+    mint_compiled,
+)
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution"
 EXPIRATION = datetime(2026, 8, 19, 18, 0, tzinfo=UTC)
@@ -37,6 +44,10 @@ class FakeSTS:
         if self.error:
             raise self.error
         return self.response
+
+
+class PackedPolicyError(Exception):
+    response = {"Error": {"Code": "PackedPolicyTooLarge"}}
 
 
 def test_mint_compiles_and_sends_the_inline_policy(
@@ -124,6 +135,17 @@ def test_mint_wraps_sts_failures(manifest_loader, scope_spec: dict[str, object])
             role_arn=ROLE_ARN,
             scene_id="scene-denied",
             sts_client=FakeSTS(error=RuntimeError("AccessDenied")),
+        )
+
+    with pytest.raises(
+        PackedPolicyTooLargeError,
+        match=r"3 selected object\(s\) across 2 read prefix\(es\)",
+    ):
+        mint_compiled(
+            compilation,
+            role_arn=ROLE_ARN,
+            scene_id="scene-packed",
+            sts_client=FakeSTS(error=PackedPolicyError("packed")),
         )
 
 

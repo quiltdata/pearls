@@ -41,6 +41,10 @@ class MintError(PearlsError):
     """STS rejected the request or returned an invalid credential response."""
 
 
+class PackedPolicyTooLargeError(MintError):
+    """STS rejected the compressed session policy despite valid plaintext size."""
+
+
 class AuthorityModeError(PearlsError):
     """A Scene runner request does not have exact, version-pinned authority."""
 

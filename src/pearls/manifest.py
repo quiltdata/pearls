@@ -331,6 +331,29 @@ def load_quilt_manifest_from_s3(
         ) from error
 
 
+def validate_manifest_object_integrity(item: ManifestObject) -> None:
+    """Admit only descriptors the runner can pin and verify before minting."""
+    if (
+        item.version_id is None
+        or item.hash_type is None
+        or not isinstance(item.hash_value, str)
+        or not item.hash_value
+    ):
+        raise AuthorityModeError(
+            f"Selected input {item.logical_key!r} lacks a version ID or content hash"
+        )
+    supported = {
+        checksums.SHA256_HASH_NAME,
+        checksums.SHA256_CHUNKED_HASH_NAME,
+        checksums.CRC64NVME_HASH_NAME,
+    }
+    if item.hash_type not in supported:
+        raise AuthorityModeError(
+            f"Selected input {item.logical_key!r} uses unsupported Quilt content hash type "
+            f"{item.hash_type!r}"
+        )
+
+
 def _calculate_hash(hash_type: str, content: bytes) -> str:
     if hash_type == checksums.SHA256_HASH_NAME:
         result = checksums.legacy_calculate_checksum_bytes(content)
@@ -350,10 +373,10 @@ def read_manifest_object(
     max_bytes: int | None = None,
 ) -> bytes:
     """Read one exact S3 version, optionally bound its bytes, and verify its hash."""
-    if item.version_id is None or item.hash_type is None or item.hash_value is None:
-        raise AuthorityModeError(
-            f"Selected input {item.logical_key!r} lacks a version ID or content hash"
-        )
+    validate_manifest_object_integrity(item)
+    assert item.version_id is not None
+    assert item.hash_type is not None
+    assert item.hash_value is not None
     if max_bytes is not None and (not isinstance(max_bytes, int) or max_bytes < 0):
         raise ValueError("max_bytes must be a nonnegative integer or None")
     try:

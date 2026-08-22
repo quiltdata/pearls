@@ -4,6 +4,45 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.2] - 2026-08-22
+
+### Changed
+
+- **Prefix-scoped input authority (#23):** session policies now contribute one
+  physical read prefix per source registry instead of enumerating selected object
+  ARNs and VersionIds. The four per-object/mixed/prefix policy modes and
+  `allow_prefix_fallback` are removed; every compilation reports
+  `mode="prefix-scoped"` and its admitted prefixes.
+- Session policies now use plain resource-scoped allows for input reads, exact
+  Quilt metadata reads, output writes, bucket-versioning checks, and Bedrock
+  invocation. The broad allows paired with `Deny`/`NotResource` guardrails were
+  removed because the session policy already intersects with the base role.
+- GitHub Actions now pins `actions/checkout` v5, removing the Node 20
+  deprecation warning emitted by the v4 runtime.
+- Runner preflight now rejects missing or unsupported input integrity metadata
+  before `AssumeRole`; materialization still requests the exact `VersionId` and
+  verifies returned bytes against the declared Quilt hash. STS
+  `PackedPolicyTooLarge` responses become a typed `PackedPolicyTooLargeError`
+  naming selected-object and prefix counts.
+
+### Security
+
+- Input provenance is enforced at the content boundary: the runner admits only
+  selected descriptors with exact S3 versions and supported Quilt hashes, then
+  verifies both before trusted handler code runs. IAM bounds read blast radius
+  to source prefixes rather than attempting to prove content identity.
+
+### Known limitations
+
+- A prefix-scoped Scene credential can read known objects under an admitted
+  source prefix that the manifest scope did not select. `scene check` reports
+  this under `unproven`; Pearls verifies delivered selected bytes but does not
+  prove the absence of extra reads by the trusted in-process handler.
+- The STS packed-policy budget is undocumented and cannot be calculated during
+  preflight. The constant-size input scope avoids object-count growth, but AWS
+  can still reject the complete output/Bedrock policy at mint time; that refusal
+  is surfaced as `PackedPolicyTooLargeError`.
+
 ## [0.2.1] - 2026-08-22
 
 ### Security

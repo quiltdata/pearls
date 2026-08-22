@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pearls"
-version = "0.2.1"
+version = "0.2.2"
 description = "Compile pinned Quilt Package scopes into least-authority AWS STS credentials"
 readme = "README.md"
 requires-python = ">=3.11"
