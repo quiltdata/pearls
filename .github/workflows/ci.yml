@@ -10,7 +10,9 @@ name: CI
 # would refuse anyway because it accepts a given name and version exactly once.
 #
 # workflow_dispatch runs the same guarded path, for retrying a release whose
-# publish step failed after the version was already merged.
+# publish step failed after the version was already merged. It must be
+# dispatched against main: publishing is refused for any other ref, because a
+# Trusted Publisher does not distinguish refs and an upload cannot be undone.
 #
 # The already-published check runs in the distribution job rather than the
 # release job, so a merge that releases nothing never reaches the protected
@@ -148,10 +150,14 @@ jobs:
 
   release:
     needs: [test, distribution]
+    # main only, for both events. A dispatch can choose any ref, and PyPI's
+    # Trusted Publisher matches on owner, repository, workflow filename, and
+    # environment, not on the ref, so without this condition a dispatch against
+    # an unmerged branch could permanently publish code that is not on main.
     if: |
       needs.distribution.outputs.new == 'true'
-      && (github.event_name == 'workflow_dispatch'
-          || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'workflow_dispatch' || github.event_name == 'push')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

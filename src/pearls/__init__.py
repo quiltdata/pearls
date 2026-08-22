@@ -1,8 +1,6 @@
 """AWS-native minimum-viable TAJ compiler and bounded Scene runner."""
 
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _distribution_version
-
+from ._version import resolve_version
 from .authoring import (
     DEFAULT_GENESIS_WORKFLOW,
     GenesisAuthoringPlan,
@@ -182,10 +180,7 @@ __all__ = [
     "verify_sealed_handler",
 ]
 
-# Read from the installed distribution metadata rather than restated here, so
-# the CLI's --version, the JSON receipts' pearls_version, and the published
-# distribution cannot disagree. pyproject.toml is the single declaration.
-try:
-    __version__ = _distribution_version("pearls")
-except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
-    __version__ = "0.0.0+unknown"
+# Resolved rather than restated here, so the CLI's --version, the JSON receipts'
+# pearls_version, and the published distribution cannot disagree. See
+# pearls._version for why installed metadata alone is not sufficient.
+__version__ = resolve_version()

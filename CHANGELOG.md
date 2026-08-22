@@ -4,6 +4,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-08-22
+
+### Security
+
+- **Releases are refused for any ref but `main`.** A PyPI Trusted Publisher
+  matches on owner, repository, workflow filename, and environment, not on the
+  ref, so a `workflow_dispatch` against an unmerged branch could permanently
+  publish code that is not on `main`. The release job now requires
+  `refs/heads/main` for both the push and the dispatch path. 0.2.0 was in fact
+  published this way, deliberately, to register the name before the rename PR
+  merged.
+
+### Fixed
+
+- `pearls.__version__` no longer reports a version belonging to different code.
+  Reading installed distribution metadata removed the drift of a restated
+  literal, but metadata describes the distribution rather than the module that
+  was imported: a source checkout on `sys.path` shadows a differently versioned
+  install, and an editable install's metadata freezes at install time. Version
+  resolution now trusts metadata only when the installed distribution actually
+  contains the imported file, falls back to the checkout's own
+  `pyproject.toml`, and reports `0.0.0+unknown` rather than guessing. This
+  matters because the value is stamped into every JSON receipt as
+  `pearls_version`, where it is a provenance claim.
+
+### Known limitations
+
+- `0.0.0+unknown` is reported for code that neither an installed distribution
+  nor a readable `pyproject.toml` identifies, for instance a package imported
+  from a zip or vendored into another tree. A receipt then records that the
+  version could not be established, which is weaker than a version but not a
+  false one.
+
 ## [0.2.0] - 2026-08-21
 
 ### Changed
