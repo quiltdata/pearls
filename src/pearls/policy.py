@@ -22,7 +22,7 @@ from .manifest import (
     parse_output_package,
     parse_output_selectors,
 )
-from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector, PolicyMode
+from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector
 
 DEFAULT_MAX_POLICY_CHARACTERS = 2048
 _OUTPUT_REVISION_ID_RE = re.compile(r"^[A-Za-z0-9_+=,.@-]{2,64}$")
@@ -32,7 +32,6 @@ _ALLOWED_SCOPE_KEYS = {
     "writable",
     "bedrock_model",
     "bedrock_invoke_resources",
-    "allow_prefix_fallback",
     "require_version_ids",
 }
 _RUNTIME_OUTPUT_KEYS = frozenset({"run/scene.json", "run/invocation.json"})
@@ -107,43 +106,6 @@ def _deduplicate(resources: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(resources))
 
 
-def _guardrail_statements(
-    current_read_resources: Sequence[str], output: OutputPackage
-) -> list[dict[str, Any]]:
-    """Return explicit denies that resource policies cannot bypass."""
-    return [
-        {
-            "Effect": "Deny",
-            "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
-            "Resource": "*",
-        },
-        {
-            "Effect": "Deny",
-            "Action": "s3:GetObject",
-            "NotResource": _deduplicate(current_read_resources),
-        },
-        {
-            "Effect": "Deny",
-            "Action": "s3:PutObject",
-            "NotResource": list(output.write_resources),
-        },
-    ]
-
-
-def _write_statement(output: OutputPackage) -> dict[str, Any]:
-    """Allow writes only where the paired exact NotResource deny does not apply.
-
-    The wildcard avoids duplicating a potentially large resource list in the STS
-    plaintext policy. ``_guardrail_statements`` always emits the matching explicit
-    deny, so IAM's deny precedence leaves the effective write set unchanged.
-    """
-    return {
-        "Effect": "Allow",
-        "Action": "s3:PutObject",
-        "Resource": "*",
-    }
-
-
 def _output_versioning_statement(output: OutputPackage) -> dict[str, Any]:
     return {
         "Effect": "Allow",
@@ -189,80 +151,16 @@ def _bedrock_statements(invocation: BedrockInvocation | None) -> list[dict[str, 
     ]
 
 
-def _current_read_statement(_resources: Sequence[str]) -> dict[str, Any]:
-    """Allow reads only where the paired exact NotResource deny permits them.
-
-    The wildcard avoids duplicating every exact current-object ARN in the STS
-    plaintext policy. ``_guardrail_statements`` always emits the matching deny,
-    so IAM deny precedence leaves the effective read set unchanged.
-    """
-    return {
-        "Effect": "Allow",
-        "Action": "s3:GetObject",
-        "Resource": "*",
-    }
-
-
-def _exact_read_statements(
-    objects: Sequence[ManifestObject], metadata_resources: Sequence[str]
-) -> tuple[list[dict[str, Any]], PolicyMode]:
-    versioned = [item for item in objects if item.version_id is not None]
-    unversioned = [item for item in objects if item.version_id is None]
-    statements: list[dict[str, Any]] = []
-
-    if versioned:
-        resources = _deduplicate([item.arn for item in versioned])
-        version_ids = list(dict.fromkeys(item.version_id for item in versioned))
-        statements.extend(
-            [
-                {
-                    "Effect": "Deny",
-                    "Action": "s3:GetObjectVersion",
-                    "Resource": "*",
-                    "Condition": {"StringNotEquals": {"s3:VersionId": version_ids}},
-                },
-                {
-                    "Effect": "Allow",
-                    "Action": "s3:GetObjectVersion",
-                    "Resource": resources,
-                },
-            ]
-        )
-    else:
-        statements.append(
-            {
-                "Effect": "Deny",
-                "Action": "s3:GetObjectVersion",
-                "Resource": "*",
-            }
-        )
-
-    current_resources = [item.arn for item in unversioned]
-    current_resources.extend(metadata_resources)
-    statements.append(_current_read_statement(current_resources))
-
-    if versioned and unversioned:
-        mode: PolicyMode = "mixed"
-    elif versioned:
-        mode = "per-object-version"
-    else:
-        mode = "per-object"
-    return statements, mode
-
-
 def _directory_prefix(keys: Sequence[str]) -> str:
     """Return a common S3 directory prefix, never a partial path component."""
-    if not keys:
-        return ""
     shared = commonprefix(list(keys))
     if "/" not in shared:
         return ""
     return shared[: shared.rfind("/") + 1]
 
 
-def _prefix_read_statements(
-    objects: Sequence[ManifestObject],
-) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+def _read_prefix_resources(objects: Sequence[ManifestObject]) -> tuple[str, ...]:
+    """Return one bounded physical prefix per selected source registry."""
     by_bucket: dict[str, list[str]] = defaultdict(list)
     for item in objects:
         by_bucket[item.bucket].append(item.key)
@@ -270,19 +168,50 @@ def _prefix_read_statements(
     resources: list[str] = []
     for bucket in sorted(by_bucket):
         prefix = _directory_prefix(sorted(by_bucket[bucket]))
+        if not prefix:
+            raise InvalidScopeError(
+                f"selected objects in source bucket {bucket!r} have no bounded common directory "
+                "prefix; refusing bucket-root read authority"
+            )
+        if prefix.startswith(".quilt/"):
+            raise InvalidScopeError(
+                f"selected objects in source bucket {bucket!r} require common prefix "
+                f"{prefix!r}, which overlaps the reserved .quilt/ metadata namespace"
+            )
         resources.append(f"arn:aws:s3:::{bucket}/{prefix}*")
-    statement = {
+    return tuple(resources)
+
+
+def _read_statements(
+    prefix_resources: Sequence[str], metadata_resources: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Allow versioned data reads and exact current Quilt metadata reads."""
+    return [
+        {
+            "Effect": "Allow",
+            "Action": "s3:GetObjectVersion",
+            "Resource": list(prefix_resources),
+        },
+        {
+            "Effect": "Allow",
+            "Action": "s3:GetObject",
+            "Resource": _deduplicate(metadata_resources),
+        },
+        {
+            "Effect": "Deny",
+            "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
+            "Resource": "*",
+        },
+    ]
+
+
+def _write_statement(output: OutputPackage) -> dict[str, Any]:
+    """Allow writes only to the exact package and Quilt publication resources."""
+    return {
         "Effect": "Allow",
-        "Action": ["s3:GetObject", "s3:GetObjectVersion"],
-        "Resource": resources,
+        "Action": "s3:PutObject",
+        "Resource": list(output.write_resources),
     }
-    warnings = (
-        "Prefix fallback widens readable S3 resources beyond the pinned manifest selection.",
-        "Prefix fallback cannot enforce manifest version IDs; "
-        "verify content hashes after download.",
-        f"Widened read resources: {', '.join(resources)}",
-    )
-    return [statement], warnings
 
 
 def _serialize(statements: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], str]:
@@ -302,11 +231,11 @@ def compile(
 ) -> CompiledPolicy:
     """Compile a pinned Quilt manifest and logical scope into an STS policy.
 
-    Exact object resources are always attempted first. If they exceed the STS
-    plaintext policy limit, compilation fails closed unless the caller explicitly
-    sets ``allow_prefix_fallback`` in the sealed scope specification.
-    ``include_manifest_read=False`` is reserved for runners that already resolved
-    the manifest and carry every selected object descriptor in memory.
+    Selected data is authorized by one physical S3 prefix per source registry,
+    independent of object count. The runner requests every selected object by its
+    exact VersionId and verifies its declared Quilt hash before exposing bytes to
+    the handler. ``include_manifest_read=False`` is reserved for runners that
+    already resolved the manifest and carry every selected descriptor in memory.
     """
     if not isinstance(scope_spec, Mapping):
         raise InvalidScopeError("scope_spec must be a mapping")
@@ -341,7 +270,6 @@ def compile(
         scope_spec.get("bedrock_invoke_resources"),
         profile_loader=bedrock_profile_loader,
     )
-    allow_prefix_fallback = _parse_boolean(scope_spec, "allow_prefix_fallback")
     require_version_ids = _parse_boolean(scope_spec, "require_version_ids")
 
     loader = manifest_loader or load_quilt_manifest
@@ -352,69 +280,40 @@ def compile(
             "selected objects have no S3 version ID: " + ", ".join(missing_versions)
         )
 
+    read_prefixes = _read_prefix_resources(selected)
     metadata_read_resources = list(output.read_resources)
     if include_manifest_read:
         metadata_read_resources.insert(0, manifest.manifest_arn)
-    read_statements, mode = _exact_read_statements(selected, metadata_read_resources)
-    current_read_resources = [item.arn for item in selected if item.version_id is None]
-    current_read_resources.extend(metadata_read_resources)
-    guardrails = _guardrail_statements(current_read_resources, output)
     model_statements = _bedrock_statements(bedrock)
     document, policy_json = _serialize(
         [
-            *guardrails,
-            *read_statements,
+            *_read_statements(read_prefixes, metadata_read_resources),
             _output_versioning_statement(output),
             *model_statements,
             _write_statement(output),
         ]
     )
-    warnings: tuple[str, ...] = ()
-    if missing_versions:
-        warnings = (
-            "Some selected objects have no S3 version ID; IAM pins their keys but not their bytes. "
-            "Verify Quilt hashes after download.",
+    if len(policy_json) > max_policy_characters:
+        raise PolicySizeError(
+            f"inline session policy is {len(policy_json)} characters; "
+            f"plaintext limit is {max_policy_characters}"
         )
 
-    if len(policy_json) > max_policy_characters:
-        if not allow_prefix_fallback:
-            raise PolicySizeError(
-                f"inline session policy is {len(policy_json)} characters; "
-                f"limit is {max_policy_characters}; prefix fallback was not authorized"
-            )
-        prefix_statements, prefix_warnings = _prefix_read_statements(selected)
-        mode = "per-prefix"
-        warnings += prefix_warnings
-        prefix_resources = prefix_statements[0]["Resource"]
-        read_statements = [
-            {
-                "Effect": "Deny",
-                "Action": "s3:GetObjectVersion",
-                "NotResource": prefix_resources,
-            },
-            *prefix_statements,
-            _current_read_statement(metadata_read_resources),
-        ]
-        guardrails = _guardrail_statements([*prefix_resources, *metadata_read_resources], output)
-        document, policy_json = _serialize(
-            [
-                *guardrails,
-                *read_statements,
-                _output_versioning_statement(output),
-                *model_statements,
-                _write_statement(output),
-            ]
+    warnings: tuple[str, ...] = (
+        "Prefix-scoped credentials can read objects under the reported source prefixes "
+        "that are not selected by the manifest scope.",
+        "Selected input identity must be enforced by exact VersionId requests and Quilt hash "
+        "verification in a runner; IAM does not enforce it.",
+    )
+    if missing_versions:
+        warnings += (
+            "Some selected objects have no S3 version ID; a Scene runner will refuse them.",
         )
-        if len(policy_json) > max_policy_characters:
-            raise PolicySizeError(
-                f"prefix session policy is {len(policy_json)} characters; "
-                f"limit is {max_policy_characters}"
-            )
 
     return CompiledPolicy(
         document=document,
         policy_json=policy_json,
-        mode=mode,
+        mode="prefix-scoped",
         manifest=manifest,
         readable_selectors=selectors,
         selected_objects=selected,
@@ -423,4 +322,5 @@ def compile(
         warnings=warnings,
         writable_selectors=writable_selectors,
         bedrock_invoke_resources=bedrock.invoke_resources if bedrock is not None else (),
+        read_prefixes=read_prefixes,
     )

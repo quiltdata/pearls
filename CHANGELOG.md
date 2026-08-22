@@ -4,6 +4,54 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-08-22
+
+### Changed
+
+- **Prefix-scoped input authority (#23):** session policies now contribute one
+  physical read prefix per source registry instead of enumerating selected object
+  ARNs and VersionIds. The four per-object/mixed/prefix policy modes and
+  `allow_prefix_fallback` are removed; every compilation reports
+  `mode="prefix-scoped"` and its admitted prefixes.
+- Session policies now use resource-scoped allows for versioned input reads,
+  exact Quilt metadata reads, output writes, bucket-versioning checks, and
+  Bedrock invocation. A standalone explicit deny preserves defense in depth for
+  every object-delete and bucket-list action without restoring the former broad
+  wildcard allow plus `Deny`/`NotResource` construction.
+- Unsafe common-prefix compilation now fails closed: selected source objects
+  that share only a bucket root or require a `.quilt/` metadata prefix are
+  refused rather than receiving bucket-wide or metadata-namespace authority.
+  Prefix authority grants only `s3:GetObjectVersion`; current Quilt metadata
+  reads remain exact.
+- The breaking policy-mode and scope-grammar changes ship as 0.3.0. The
+  `scene run` JSON receipt advances to schema v4 and now includes the complete
+  non-secret compiled authority report.
+- GitHub Actions now pins `actions/checkout` v5, removing the Node 20
+  deprecation warning emitted by the v4 runtime.
+- Runner preflight now rejects missing or unsupported input integrity metadata
+  before `AssumeRole`; materialization still requests the exact `VersionId` and
+  verifies returned bytes against the declared Quilt hash. STS
+  `PackedPolicyTooLarge` responses become a typed `PackedPolicyTooLargeError`
+  naming selected-object and prefix counts.
+
+### Security
+
+- Input provenance is enforced at the content boundary: the runner admits only
+  selected descriptors with exact S3 versions and supported Quilt hashes, then
+  verifies both before trusted handler code runs. IAM bounds read blast radius
+  to source prefixes rather than attempting to prove content identity.
+
+### Known limitations
+
+- A prefix-scoped Scene credential can read known objects under an admitted
+  source prefix that the manifest scope did not select. `scene check` reports
+  this under `unproven`; Pearls verifies delivered selected bytes but does not
+  prove the absence of extra reads by the trusted in-process handler.
+- The STS packed-policy budget is undocumented and cannot be calculated during
+  preflight. The constant-size input scope avoids object-count growth, but AWS
+  can still reject the complete output/Bedrock policy at mint time; that refusal
+  is surfaced as `PackedPolicyTooLargeError`.
+
 ## [0.2.1] - 2026-08-22
 
 ### Security

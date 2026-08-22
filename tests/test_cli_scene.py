@@ -126,7 +126,11 @@ def test_check_passes_and_reports_non_secret_authority() -> None:
     assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-scene-check/v2"
     assert payload["status"] == "ok"
     assert payload["genesis"]["top_hash"] == TOP_HASH
-    assert payload["authority"]["mode"] == "per-object-version"
+    assert payload["authority"]["mode"] == "prefix-scoped"
+    assert payload["authority"]["read_prefixes"] == ["arn:aws:s3:::genesis-bucket/genesis/input/*"]
+    assert payload["authority"]["input_integrity_requirement"] == (
+        "runner-exact-version-and-quilt-hash"
+    )
     assert payload["authority"]["bedrock_model_arn"] == MODEL_ARN
     assert payload["authority"]["output_revision_id"] == payload["scene_id"]
     assert payload["handler"]["logical_key"] == "protocol/handler.py"
@@ -229,7 +233,9 @@ def test_check_labels_which_checks_needed_the_trusted_bootstrap_identity() -> No
 
     assert harness.check("--json") == 0
 
-    by_name = {entry["name"]: entry["identity"] for entry in harness.streams.json()["checks"]}
+    payload = harness.streams.json()
+    by_name = {entry["name"]: entry["identity"] for entry in payload["checks"]}
+    details = {entry["name"]: entry["detail"] for entry in payload["checks"]}
     assert by_name["genesis-controls-verified"] == "trusted-bootstrap"
     assert by_name["runtime-requirements-sealed"] == "trusted-bootstrap"
     assert by_name["runtime-requirements-compatible"] == "local"
@@ -238,7 +244,10 @@ def test_check_labels_which_checks_needed_the_trusted_bootstrap_identity() -> No
     assert by_name["argument-shapes"] == "local"
     assert by_name["model-selection-exact"] == "local"
     assert by_name["model-authority-exact"] == "local"
+    assert by_name["input-integrity-enforcement-admitted"] == "local"
     assert by_name["session-policy-compiled"] == "local"
+    assert " of 2048 serialized characters" in details["session-policy-compiled"]
+    assert "1 source prefix(es)" in details["session-policy-compiled"]
 
 
 def test_check_states_what_it_cannot_prove_including_bedrock_model_access() -> None:
@@ -254,6 +263,9 @@ def test_check_states_what_it_cannot_prove_including_bedrock_model_access() -> N
     assert "declaration completeness" in stdout
     assert "No AssumeRole, model invocation, or write was performed" in stdout
     assert "no byte of the sealed handler was executed" in stdout
+    assert "prefix-scoped for input reads" in stdout
+    assert "does not prove the absence of extra reads" in stdout
+    assert "packed STS session-policy budget is undocumented" in stdout
 
 
 def test_check_human_output_summarizes_authority() -> None:
@@ -267,7 +279,7 @@ def test_check_human_output_summarizes_authority() -> None:
     assert "pass  sealed-handler-verified (trusted-bootstrap)" in stdout
     assert "runtime requirements" in stdout
     assert "authority mode" in stdout
-    assert "per-object-version" in stdout
+    assert "prefix-scoped" in stdout
     assert "proj/trial001-worker-output@output-bucket" in stdout
 
 
@@ -513,11 +525,16 @@ def test_run_receipt_has_a_stable_versioned_shape_without_secrets() -> None:
     assert harness.run("--json", "--metadata", metadata, "--message", "Trial 001") == 0
 
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-scene-run/v3"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-scene-run/v4"
     assert payload["status"] == "published"
     assert payload["scene_id"].startswith("scene-2026")
     assert payload["genesis"]["uri"] == GENESIS_URI
     assert payload["handler"]["source_sha256"]
+    assert payload["authority"]["mode"] == "prefix-scoped"
+    assert payload["authority"]["read_prefixes"] == ["arn:aws:s3:::genesis-bucket/genesis/input/*"]
+    assert payload["authority"]["input_integrity_requirement"] == (
+        "runner-exact-version-and-quilt-hash"
+    )
     requirements = payload["runtime_requirements"]
     assert requirements["control"]["logical_key"] == "protocol/requirements.json"
     assert requirements["control"]["version_id"] == "version-protocol/requirements.json"

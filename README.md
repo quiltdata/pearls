@@ -133,10 +133,11 @@ quilt+s3://manifest-bucket#package=project%2Fsealed-scene&top_hash=<64 hex chara
 
 The package name is URL encoded in the fragment. Floating package pointers,
 hash prefixes, local files, wildcard-bearing S3 keys, and unpinned manifests
-are rejected. The trusted compiler identity needs permission to resolve the
-manifest. The resulting worker credential can read only that package revision's
-exact `.quilt/packages/<top-hash>` manifest object from the input registry; it
-does not receive floating-pointer or sibling-manifest access.
+are rejected. The compiler identity resolves the manifest. The resulting worker credential receives
+one physical S3 read prefix per source registry represented by the selection, plus
+the exact content-addressed manifest read when the caller has not already resolved
+it. IAM bounds the read blast radius to those prefixes; the runner, rather than
+IAM, enforces each selected object's exact version and content hash.
 
 A scope is a mapping like [`examples/scope.json`](examples/scope.json):
 
@@ -144,8 +145,7 @@ A scope is a mapping like [`examples/scope.json`](examples/scope.json):
 {
   "readable": ["input-control/worker.json", "input-content/"],
   "writable_package": "scenes/example/output@my-project-bucket",
-  "require_version_ids": true,
-  "allow_prefix_fallback": false
+  "require_version_ids": true
 }
 ```
 
@@ -156,9 +156,11 @@ selectors are de-duplicated deterministically. The output data prefix is
 `<package-name>/` in the named bucket.
 
 `require_version_ids` fails compilation if any selected object lacks an S3
-version ID. Without it, those entries receive exact-key `s3:GetObject`
-permission and the compilation report warns that IAM does not pin their
-bytes. The runtime must then verify the Quilt content hash after download.
+version ID. A Scene run always requires both a version ID and a supported Quilt
+content hash, requests that exact version, and verifies the returned bytes before
+the handler executes. The prefix credential can read other objects under an
+admitted source prefix; those objects are not materialized or accepted as inputs
+by the runner.
 
 ### Compile and mint
 
@@ -187,10 +189,14 @@ worker_session_kwargs = credentials.boto3_kwargs()
 ```
 
 `CompiledPolicy.policy_json` is the exact inline policy sent to STS.
-`CompiledPolicy.report()` records the mode, selected logical and physical
-objects, output package, policy size, and any degraded guarantees. Secret
-credential fields are excluded from `repr`, but remain bearer secrets and
-must never be logged or committed.
+`CompiledPolicy.report()` records the single `prefix-scoped` mode, admitted
+source prefixes, selected logical and physical objects with their declared
+versions and hashes, output package, serialized policy size, and the integrity
+mechanism a runner must enforce. The low-level `mint()` API only creates the
+prefix-scoped capability; it does not download or verify selected objects.
+Callers using it directly must perform the same exact-VersionId and Quilt-hash
+checks before consuming bytes. Secret credential fields are excluded from
+`repr`, but remain bearer secrets and must never be logged or committed.
 
 ### Run one bounded Scene
 
@@ -649,15 +655,16 @@ new execution needs a new ID and reuse is an explicit idempotency assertion.
 `--metadata` takes inline JSON or `@path`, and maps to the workflow-aware caller
 half of `output_meta`; `--message` and `--workflow` / `--no-workflow` map to
 `output_message` and `output_workflow`. The `scene check` receipt schema is v2
-and the run receipt schema is v3. Both include exact requirements-control
+and the run receipt schema is v4. Both include exact requirements-control
 bucket/key/VersionId, Quilt hash, source SHA-256/size, the actual and required
 Python versions, and bounded per-import evidence. Each import records marker
 applicability, distribution-version status, and module-resolution status as
 separate fields; marker-skipped entries are `not-checked`, not “compatible.” A
 summary reports declared, applicable, and skipped counts, and both receipt types
 carry explicit limitations including the unproven distribution-to-module
-association. The run receipt otherwise contains only non-secret identity: Scene
-ID, genesis URI/top hash, verified handler provenance, assumed-role ARN, immutable package URI/top
+association. The run receipt additionally carries the full non-secret compiled
+`authority` report and contains only non-secret identity: Scene ID, genesis
+URI/top hash, verified handler provenance, assumed-role ARN, immutable package URI/top
 hash, revision and S3 version identities, whether the revision was reused,
 `latest` disposition, and timestamps. Its top-level status is `published` or
 `published-not-latest`; either is exit 0 because the revision is durable.
@@ -681,22 +688,28 @@ command claims no sandboxing and no ambient credential isolation.
 
 | Scene role | AWS-native enforcement |
 | --- | --- |
-| Input Control | Only selected control logical keys resolve to versioned read resources. Sibling control files are absent from the allow set. |
-| Input Content | Selected content keys receive exact S3 object ARNs. One set-based deny admits only the selected `s3:VersionId` values, and S3 rejects a selected version ID when requested against a different object key. |
-| Output Content | `s3:PutObject` is limited to `<package-name>/*` in the declared output bucket. Quilt consumer validation may read `.quilt/workflows/*` in that bucket. |
-| Output Control | Quilt manifest blobs may be written under `.quilt/packages/*`; named-package writes are limited to `.quilt/named_packages/<package-name>/*`, with exact reads of that package's `latest` pointer and the current Scene ID's revision pointer for CAS and idempotency. Sibling revision pointers remain unreadable. |
+| Input Control | Selected logical keys determine the descriptors the runner materializes. IAM grants one physical prefix per source registry, so it bounds blast radius but does not carry the manifest. |
+| Input Content | The runner requests every selected object with its declared `VersionId`, verifies the returned version, and verifies the bytes against the declared Quilt hash before invoking the handler. |
+| Output Content | `s3:PutObject` is allowed only on the declared data selectors in `<package-name>/` plus the runner-owned records. |
+| Output Control | Quilt manifest writes are limited to `.quilt/packages/*`; named-package writes are limited to `.quilt/named_packages/<package-name>/*`, with exact reads of that package's `latest` pointer and the current Scene ID's revision pointer for CAS and idempotency. Sibling revision pointers remain unreadable. |
 
-Every session policy explicitly denies deletes and bucket listing on all
-resources. Action-specific `NotResource` guardrails prevent bucket policies
-from restoring out-of-scope current-object reads or writes. To stay within the
-STS plaintext budget, current-object `GetObject` and output `PutObject` use
-compact wildcard allows paired with those exact denies; IAM deny precedence
-keeps their effective resource sets equal to the enumerated boundaries. Exact
-version mode uses one global mismatch deny containing the sealed set of S3
-version IDs and one resource-set allow containing the selected object ARNs. Because S3 version
-IDs uniquely identify stored object versions, using an admitted ID against a
-different key does not return that key. The policy grants no IAM, STS, ACL,
-bucket-policy, or input-write action.
+The session policy uses resource-scoped `Allow` statements plus a standalone
+explicit deny for every `s3:DeleteObject*` and `s3:ListBucket*` action. Its
+intersection with the base role excludes all other actions and resources absent
+from either policy. The policy grants no IAM, STS, ACL, bucket-policy, or
+input-write action. Input policy size is O(source registries), not O(selected
+objects): each registry contributes one common physical prefix. Compilation
+refuses a registry whose selected objects share only the bucket root or whose
+common prefix overlaps `.quilt/`; it never widens those cases to bucket-wide or
+Quilt-metadata read authority. Output write isolation and exact Bedrock
+model/profile scoping are unchanged.
+
+A prefix-scoped credential can read known objects under an admitted source prefix
+that the manifest scope did not select. This is an explicit accepted risk and is
+reported by `scene check` under `unproven`. It does not weaken delivered-input
+provenance: the runner exposes only selected bytes whose exact S3 version and
+Quilt hash both verify. The trusted in-process handler receives the same session,
+so Pearls does not claim to prove the absence of extra SDK reads.
 
 The compiler deliberately does **not** add a blanket Bedrock `Deny` with
 `NotResource` set only to the selected ARN: that would also deny the supporting
@@ -757,23 +770,18 @@ credentials can see):
 
 ### Policy-size behavior
 
-STS limits an inline session policy to 2,048 plaintext characters. Exact mode
-uses set-based version-ID and resource lists rather than two statements per
-object, then minifies and measures the JSON before calling AWS. Inference-profile
-ARNs and regional support resources are part of that same measured document;
-they never bypass the limit. The five-object foundation-model Scene regression
-compiles below the hard limit with all required Quilt metadata reads and remains
-version-pinned. The compiler fails closed with `PolicySizeError` when a larger
-policy does not fit.
+STS accepts at most 2,048 plaintext characters and also applies an undocumented
+compressed packed-policy budget. Input authority contributes one prefix per
+source registry regardless of selected-object count; selected VersionIds and
+object ARNs are absent from the policy. Exact output and Bedrock resources remain
+part of the measured document, and compilation refuses plaintext above the
+configured limit.
 
-A sealed scope may explicitly set `allow_prefix_fallback` to `true`. The
-compiler then emits common physical S3-prefix resources and reports
-`mode="per-prefix"`, every widened resource, and loss of version enforcement.
-This fallback can expose objects that are not in the selected manifest; a root
-or `.quilt/`-overlapping widened prefix can also expose sibling Quilt control
-objects. These losses are listed in the compilation report and the fallback is
-never automatic. Exact metadata-boundary claims apply only outside
-`per-prefix` mode. Splitting work into smaller Scenes is the safer response.
+The packed percentage is known only after `AssumeRole`. If AWS returns
+`PackedPolicyTooLarge`, Pearls raises `PackedPolicyTooLargeError` with the selected
+object count, prefix count, and plaintext size instead of presenting the
+plaintext preflight as proof that minting will succeed. There is no policy-mode
+fallback: every successful compilation uses the same prefix-scoped read model.
 
 ### Base role
 
@@ -916,10 +924,13 @@ opt-in proof against real IAM, STS, and S3. An unrestricted session of the
 same base role first proves that the denied read/version and outside-write
 operations are otherwise allowed, and that even a bare base session cannot
 delete versions. The scoped session then proves an in-scope version read;
-reads of the pinned input manifest, output workflow configuration, and exact
-output `latest` pointer; data, manifest, and named-pointer writes; and denial
-of sibling reads, wrong versions, outside writes, listing, object deletion,
-and version deletion. A separate administrator-managed cleanup role removes
+versioned reads of a wrong existing version inside an admitted prefix; reads of
+the pinned input manifest, output workflow configuration, and exact output
+`latest` pointer; data, manifest, and named-pointer writes; and denial of current
+(unversioned) data reads, reads outside admitted prefixes, outside writes,
+listing, object deletion, and version deletion. `PEARLS_DENIED_READ` must name an
+existing version outside every admitted source prefix; the harness verifies this
+precondition. A separate administrator-managed cleanup role removes
 the exact disposable versions in `finally`; cleanup authority is never present
 on the Scene role or scoped worker. The harness requires versioned disposable
 buckets, does not provision infrastructure, and never runs merely because AWS
@@ -937,7 +948,8 @@ export PEARLS_ALLOWED_READ='s3://bucket/key?versionId=expected-version'
 # A different selected key paired with the expected version ID; S3 must return NoSuchVersion.
 export PEARLS_CROSS_OBJECT_VERSION_READ='s3://bucket/other-selected-key?versionId=expected-version'
 export PEARLS_WRONG_VERSION_READ='s3://bucket/key?versionId=other-existing-version'
-export PEARLS_DENIED_READ='s3://bucket/sibling-control.json?versionId=existing-version'
+# Must reference an existing object version outside every admitted source prefix.
+export PEARLS_DENIED_READ='s3://bucket/outside-prefix/sibling-control.json?versionId=existing-version'
 export PEARLS_WORKFLOW_READ='s3://output-bucket/.quilt/workflows/config.yml'
 export PEARLS_OUTPUT_LATEST_READ='s3://output-bucket/.quilt/named_packages/scenes/example/output/latest'
 export PEARLS_ALLOWED_WRITE='s3://output-bucket/scenes/example/output/proof.txt'

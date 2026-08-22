@@ -34,6 +34,7 @@ from .manifest import (
     load_quilt_manifest,
     parse_manifest_uri,
     read_manifest_object,
+    validate_manifest_object_integrity,
 )
 from .models import CompiledPolicy, ManifestObject, OutputPackage, OutputSelector, PinnedManifestURI
 from .policy import DEFAULT_MAX_POLICY_CHARACTERS, compile
@@ -129,6 +130,7 @@ class SceneRunResult:
     scene_id: str
     output_package: OutputPackage
     publication: PublicationResult
+    compilation: CompiledPolicy
     assumed_role_arn: str
     started_at: datetime
     completed_at: datetime
@@ -273,10 +275,12 @@ def _iso8601(value: datetime) -> str:
 
 
 def _validate_runner_authority(compilation: CompiledPolicy) -> BedrockInvocation:
-    if compilation.mode != "per-object-version":
+    if compilation.mode != "prefix-scoped":
         raise AuthorityModeError(
-            f"Scene runner requires per-object-version authority, got {compilation.mode!r}"
+            f"Scene runner requires prefix-scoped authority, got {compilation.mode!r}"
         )
+    for item in compilation.selected_objects:
+        validate_manifest_object_integrity(item)
     try:
         invocation = compilation.bedrock_invocation
     except InvalidScopeError as error:
@@ -387,6 +391,7 @@ def _execute_compiled_scene(
         scene_id=scene_id,
         output_package=compilation.output_package,
         publication=publication,
+        compilation=compilation,
         assumed_role_arn=credentials.assumed_role_arn,
         started_at=started_at,
         completed_at=completed_at,
@@ -532,6 +537,8 @@ def preflight_genesis(
         bedrock_profile_loader=bedrock_profile_loader,
         output_revision_id=output_revision_id,
     )
+    for item in compilation.selected_objects:
+        validate_manifest_object_integrity(item)
     return GenesisPreflight(
         genesis=genesis,
         objects=objects,

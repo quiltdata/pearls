@@ -9,7 +9,7 @@ from typing import Any
 
 import boto3
 
-from .errors import InvalidAssumeRoleRequest, MintError
+from .errors import InvalidAssumeRoleRequest, MintError, PackedPolicyTooLargeError
 from .manifest import ManifestLoader
 from .models import CompiledPolicy, ScopedCredentials
 from .policy import DEFAULT_MAX_POLICY_CHARACTERS, compile
@@ -92,6 +92,19 @@ def mint_compiled(
             compilation=compilation,
         )
     except Exception as error:
+        error_response = getattr(error, "response", None)
+        error_code = None
+        if isinstance(error_response, Mapping):
+            details = error_response.get("Error")
+            if isinstance(details, Mapping):
+                error_code = details.get("Code")
+        if error_code == "PackedPolicyTooLarge":
+            raise PackedPolicyTooLargeError(
+                "STS rejected the compressed session policy for "
+                f"{len(compilation.selected_objects)} selected object(s) across "
+                f"{len(compilation.read_prefixes)} read prefix(es); plaintext size "
+                f"{compilation.size} of {DEFAULT_MAX_POLICY_CHARACTERS} characters"
+            ) from error
         raise MintError(f"Unable to mint scoped STS credentials: {error}") from error
 
 

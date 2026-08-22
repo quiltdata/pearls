@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -25,6 +27,17 @@ from .models import (
     WriteSelectorKind,
 )
 
+_SUPPORTED_HASH_TYPES = frozenset(
+    {
+        checksums.SHA256_HASH_NAME,
+        checksums.SHA256_CHUNKED_HASH_NAME,
+        checksums.CRC64NVME_HASH_NAME,
+    }
+)
+_MULTIPART_HASH_LENGTHS = {
+    checksums.SHA256_CHUNKED_HASH_NAME: 32,
+    checksums.CRC64NVME_HASH_NAME: 8,
+}
 _BUCKET_RE = re.compile(
     r"^(?!\d+\.\d+\.\d+\.\d+$)(?!.*\.\.)(?!.*\.-)(?!.*-\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
 )
@@ -35,6 +48,29 @@ _MALFORMED_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _RESERVED_OUTPUT_KEYS = frozenset({"run/scene.json", "run/invocation.json"})
 
 ManifestLoader = Callable[[PinnedManifestURI], Sequence[ManifestObject]]
+
+
+def _valid_version_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value != "null"
+        and "${" not in value
+        and all(0x20 <= ord(character) <= 0xFF for character in value)
+    )
+
+
+def _valid_hash_value(hash_type: str, hash_value: str) -> bool:
+    if hash_type == checksums.SHA256_HASH_NAME:
+        return _HASH_RE.fullmatch(hash_value) is not None
+    expected_length = _MULTIPART_HASH_LENGTHS[hash_type]
+    try:
+        decoded = base64.b64decode(hash_value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return (
+        len(decoded) == expected_length and base64.b64encode(decoded).decode("ascii") == hash_value
+    )
 
 
 def _validate_bucket(bucket: str, *, error_type: type[Exception]) -> None:
@@ -245,12 +281,7 @@ def _entry_to_object(logical_key: str, entry: Any) -> ManifestObject:
     _validate_physical_key(key)
     if version_id == "null":
         version_id = None
-    if version_id is not None and (
-        not isinstance(version_id, str)
-        or not version_id
-        or "${" in version_id
-        or any(ord(character) < 0x20 or ord(character) > 0xFF for character in version_id)
-    ):
+    if version_id is not None and not _valid_version_id(version_id):
         raise ManifestLoadError(f"Manifest entry {logical_key!r} has an invalid version ID")
 
     hash_object = getattr(entry, "hash", None) or {}
@@ -331,13 +362,34 @@ def load_quilt_manifest_from_s3(
         ) from error
 
 
+def validate_manifest_object_integrity(item: ManifestObject) -> None:
+    """Admit only descriptors the runner can pin and verify before minting."""
+    if (
+        not _valid_version_id(item.version_id)
+        or not isinstance(item.hash_type, str)
+        or not isinstance(item.hash_value, str)
+        or not item.hash_value
+    ):
+        raise AuthorityModeError(
+            f"Selected input {item.logical_key!r} lacks a valid version ID or content hash"
+        )
+    if item.hash_type not in _SUPPORTED_HASH_TYPES:
+        raise AuthorityModeError(
+            f"Selected input {item.logical_key!r} uses unsupported Quilt content hash type "
+            f"{item.hash_type!r}"
+        )
+    if not _valid_hash_value(item.hash_type, item.hash_value):
+        raise AuthorityModeError(
+            f"Selected input {item.logical_key!r} has an invalid "
+            f"{item.hash_type} Quilt content hash"
+        )
+
+
 def _calculate_hash(hash_type: str, content: bytes) -> str:
     if hash_type == checksums.SHA256_HASH_NAME:
         result = checksums.legacy_calculate_checksum_bytes(content)
-    elif hash_type in (checksums.SHA256_CHUNKED_HASH_NAME, checksums.CRC64NVME_HASH_NAME):
-        result = checksums.calculate_multipart_checksum_bytes(content, checksum_type=hash_type)
     else:
-        raise InputIntegrityError(f"Unsupported Quilt content hash type: {hash_type!r}")
+        result = checksums.calculate_multipart_checksum_bytes(content, checksum_type=hash_type)
     if not isinstance(result, str):
         raise InputIntegrityError(f"Invalid Quilt content hash result for {hash_type!r}")
     return result
@@ -350,10 +402,10 @@ def read_manifest_object(
     max_bytes: int | None = None,
 ) -> bytes:
     """Read one exact S3 version, optionally bound its bytes, and verify its hash."""
-    if item.version_id is None or item.hash_type is None or item.hash_value is None:
-        raise AuthorityModeError(
-            f"Selected input {item.logical_key!r} lacks a version ID or content hash"
-        )
+    validate_manifest_object_integrity(item)
+    assert item.version_id is not None
+    assert item.hash_type is not None
+    assert item.hash_value is not None
     if max_bytes is not None and (not isinstance(max_bytes, int) or max_bytes < 0):
         raise ValueError("max_bytes must be a nonnegative integer or None")
     try:

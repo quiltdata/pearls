@@ -44,7 +44,7 @@ EXIT_USAGE = 2
 
 _SCHEMA_ROOT = "https://quiltdata.com/schemas/pearls"
 SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v2"
-SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v3"
+SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v4"
 GENESIS_AUTHOR_SCHEMA = f"{_SCHEMA_ROOT}/cli-genesis-author/v1"
 INFRA_VALIDATE_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-validate/v2"
 INFRA_PLAN_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-plan/v2"
