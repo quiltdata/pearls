@@ -1,5 +1,8 @@
 """AWS-native minimum-viable TAJ compiler and bounded Scene runner."""
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
+
 from .authoring import (
     DEFAULT_GENESIS_WORKFLOW,
     GenesisAuthoringPlan,
@@ -26,10 +29,10 @@ from .errors import (
     InvariantFinding,
     ManifestLoadError,
     MintError,
+    PearlsError,
     PolicySizeError,
     PublicationConflictError,
     PublicationError,
-    RajaStsError,
     RuntimeRequirementsError,
     WorkflowContractError,
 )
@@ -129,6 +132,7 @@ __all__ = [
     "MintError",
     "OutputPackage",
     "OutputSelector",
+    "PearlsError",
     "PinnedManifestURI",
     "PolicySizeError",
     "PublicationConflictError",
@@ -138,7 +142,6 @@ __all__ = [
     "PublicationResult",
     "PublicationStatus",
     "PublicationWriteDisposition",
-    "RajaStsError",
     "RuntimeImportRequirement",
     "RuntimeRequirementCheck",
     "RuntimeRequirements",
@@ -179,4 +182,10 @@ __all__ = [
     "verify_sealed_handler",
 ]
 
-__version__ = "0.1.5"
+# Read from the installed distribution metadata rather than restated here, so
+# the CLI's --version, the JSON receipts' pearls_version, and the published
+# distribution cannot disagree. pyproject.toml is the single declaration.
+try:
+    __version__ = _distribution_version("pearls")
+except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
+    __version__ = "0.0.0+unknown"

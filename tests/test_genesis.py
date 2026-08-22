@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from raja_sts import (
+from pearls import (
     RUNTIME_REQUIREMENTS_KEY,
     RUNTIME_REQUIREMENTS_LIMITATIONS,
     RUNTIME_REQUIREMENTS_MAX_BYTES,
@@ -102,7 +102,7 @@ def test_runtime_requirements_normalize_and_sort_imports_by_module() -> None:
             "duplicate JSON key",
         ),
         (
-            b'{"$schema":"https://quiltdata.com/schemas/raja-sts/'
+            b'{"$schema":"https://quiltdata.com/schemas/pearls/'
             b'handler-runtime-requirements/v1","python":">=3.11",'
             b'"imports":[{"module":"demo","module":"other",'
             b'"requirement":"demo"}]}',
@@ -165,7 +165,7 @@ def test_decoder_limit_failures_are_normalized_to_a_typed_refusal(
     def fail_decode(*args: object, **kwargs: object) -> object:
         raise decoder_error
 
-    monkeypatch.setattr("raja_sts.genesis.json.loads", fail_decode)
+    monkeypatch.setattr("pearls.genesis.json.loads", fail_decode)
 
     with pytest.raises(RuntimeRequirementsError, match="UTF-8 JSON object") as raised:
         parse_runtime_requirements(content)

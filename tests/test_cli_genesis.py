@@ -15,8 +15,8 @@ from authoring_support import (
 )
 from cli_support import FakeSession, Streams, make_runtime
 
-from raja_sts import parse_manifest_uri
-from raja_sts.cli import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, main
+from pearls import parse_manifest_uri
+from pearls.cli import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, main
 
 
 class GenesisHarness:
@@ -64,7 +64,7 @@ def test_dry_run_validates_everything_without_prompt_or_write(tmp_path: Path) ->
 
     assert code == EXIT_OK
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-genesis-author/v1"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-genesis-author/v1"
     assert payload["status"] == "validated"
     assert payload["dry_run"] is True
     assert payload["mutations_performed"] == []

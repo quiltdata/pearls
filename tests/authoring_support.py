@@ -55,7 +55,7 @@ ENTRIES_SCHEMA = json.dumps(
 ).encode()
 RUNTIME_REQUIREMENTS_JSON = json.dumps(
     {
-        "$schema": ("https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1"),
+        "$schema": ("https://quiltdata.com/schemas/pearls/handler-runtime-requirements/v1"),
         "python": ">=3.11",
         "imports": [],
     },

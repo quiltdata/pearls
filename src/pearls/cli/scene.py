@@ -2,7 +2,7 @@
 
 Both verbs take the same arguments so that a passing ``check`` describes the run
 that ``run`` would perform. ``check`` performs only reads; ``run`` delegates to
-:func:`raja_sts.run_scene_from_genesis` exactly once and adds no authority,
+:func:`pearls.run_scene_from_genesis` exactly once and adds no authority,
 materialization, workflow, or publication logic of its own.
 """
 
@@ -22,7 +22,7 @@ from ..bedrock import (
     parse_bedrock_invocation,
     parse_bedrock_invocation_declaration,
 )
-from ..errors import InvalidScopeError, RajaStsError
+from ..errors import InvalidScopeError, PearlsError
 from ..genesis import RuntimeRequirementsReport
 from ..manifest import ManifestLoader, load_quilt_manifest, parse_manifest_uri
 from ..models import ManifestObject, PinnedManifestURI
@@ -51,10 +51,10 @@ _LOCAL = "local"
 _DEFAULT_WORKFLOW = "<registry default>"
 
 
-class SceneHandlerError(RajaStsError):
+class SceneHandlerError(PearlsError):
     """The sealed handler itself failed during execution.
 
-    Distinct from :class:`~raja_sts.HandlerContractError`, which means the handler
+    Distinct from :class:`~pearls.HandlerContractError`, which means the handler
     returned something the runner refuses. This means the sealed code raised.
     """
 
@@ -533,7 +533,7 @@ def _deferred_handler(sealed: SealedSource, emitter: Emitter) -> SceneHandler:
         emitter.note(f"scene {context.scene_id}: executing {sealed.descriptor.logical_key}")
         try:
             return sealed.load().handler(inputs, session, context)
-        except RajaStsError:
+        except PearlsError:
             # Already a typed refusal, including the runner's own contract errors.
             raise
         except Exception as error:

@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from botocore.exceptions import BotoCoreError, ClientError
 
 from .. import __version__
-from ..errors import RajaStsError
+from ..errors import PearlsError
 from . import genesis, infra, scene
 from ._common import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, Runtime
 
@@ -58,7 +58,7 @@ def main(argv: Sequence[str] | None = None, *, runtime: Runtime | None = None) -
         return code if isinstance(code, int) else EXIT_USAGE
     try:
         result = args.run(active, args)
-    except RajaStsError as error:
+    except PearlsError as error:
         print(f"{type(error).__name__}: {error}", file=active.stderr)
         return EXIT_REFUSED
     except (BotoCoreError, ClientError, ValueError, OSError) as error:

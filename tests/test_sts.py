@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from conftest import MANIFEST_URI
 
-from raja_sts import InvalidAssumeRoleRequest, MintError, compile, mint, mint_compiled
+from pearls import InvalidAssumeRoleRequest, MintError, compile, mint, mint_compiled
 
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution"
 EXPIRATION = datetime(2026, 8, 19, 18, 0, tzinfo=UTC)
@@ -83,7 +83,7 @@ def test_mint_compiled_uses_default_sts_client(
     compilation = compile(MANIFEST_URI, scope_spec, manifest_loader=manifest_loader)
     sts = FakeSTS()
     monkeypatch.setattr(
-        "raja_sts.sts.boto3.client", lambda service: sts if service == "sts" else None
+        "pearls.sts.boto3.client", lambda service: sts if service == "sts" else None
     )
     result = mint_compiled(compilation, role_arn=ROLE_ARN, scene_id="scene-default")
     assert result.assumed_role_arn.endswith("/scene-123")

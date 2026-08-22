@@ -13,9 +13,9 @@ from botocore.exceptions import (
 )
 from cli_support import Streams, make_runtime
 
-from raja_sts import __version__
-from raja_sts.cli import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, CliRefusal, Runtime, main, run
-from raja_sts.cli._common import (
+from pearls import __version__
+from pearls.cli import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, CliRefusal, Runtime, main, run
+from pearls.cli._common import (
     Emitter,
     confirm,
     envelope,
@@ -24,7 +24,7 @@ from raja_sts.cli._common import (
     read_json_argument,
     render_table,
 )
-from raja_sts.cli._template import (
+from pearls.cli._template import (
     ROLE_ARN_OUTPUT,
     load_role_template,
     render_intrinsics,
@@ -83,7 +83,7 @@ def test_main_builds_a_default_runtime_when_none_is_supplied() -> None:
 def test_console_entry_point_exits_with_the_command_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("raja_sts.cli.main", lambda: EXIT_REFUSED)
+    monkeypatch.setattr("pearls.cli.main", lambda: EXIT_REFUSED)
 
     with pytest.raises(SystemExit) as exit_info:
         run()
@@ -119,7 +119,7 @@ def test_expected_operator_errors_are_reported_as_refusals_not_tracebacks(
     def failing(*_: Any, **__: Any) -> int:
         raise error
 
-    monkeypatch.setattr("raja_sts.cli.infra.status_command", failing)
+    monkeypatch.setattr("pearls.cli.infra.status_command", failing)
 
     code = main(["infra", "status", "--stack-name", "x"], runtime=_runtime(streams))
 

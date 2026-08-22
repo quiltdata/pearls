@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from raja_sts import WorkflowContractError
-from raja_sts.workflows import CONFIG_KEY, resolve_workflow_stamp
+from pearls import WorkflowContractError
+from pearls.workflows import CONFIG_KEY, resolve_workflow_stamp
 
 BUCKET = "output-bucket"
 

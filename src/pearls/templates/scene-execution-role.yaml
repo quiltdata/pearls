@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Administrator-applied broad Scene execution role. raja_sts narrows this
+  Administrator-applied broad Scene execution role. pearls narrows this
   role per Scene with an inline STS session policy.
 
 Parameters:
@@ -71,5 +71,5 @@ Resources:
 
 Outputs:
   SceneExecutionRoleArn:
-    Description: Pass this ARN to raja_sts.mint() or raja_sts.run_scene().
+    Description: Pass this ARN to pearls.mint() or pearls.run_scene().
     Value: !GetAtt SceneExecutionRole.Arn

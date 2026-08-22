@@ -3,11 +3,16 @@ requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "raja-sts"
-version = "0.1.5"
+name = "pearls"
+version = "0.2.0"
 description = "Compile pinned Quilt Package scopes into least-authority AWS STS credentials"
 readme = "README.md"
 requires-python = ">=3.11"
+# PEP 639 SPDX expression, supported by the pinned setuptools 83 and published
+# as Metadata 2.4 License-Expression. Do not add a "License ::" classifier
+# alongside it; the two forms are mutually exclusive.
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
   "boto3==1.43.74",
   "packaging==26.3",
@@ -24,8 +29,14 @@ classifiers = [
   "Topic :: Security",
 ]
 
+[project.urls]
+Homepage = "https://github.com/quiltdata/pearls"
+Repository = "https://github.com/quiltdata/pearls"
+Changelog = "https://github.com/quiltdata/pearls/blob/main/CHANGELOG.md"
+Issues = "https://github.com/quiltdata/pearls/issues"
+
 [project.scripts]
-pearls = "raja_sts.cli:run"
+pearls = "pearls.cli:run"
 
 [project.optional-dependencies]
 dev = [
@@ -44,10 +55,10 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-raja_sts = ["py.typed", "templates/*.yaml"]
+pearls = ["py.typed", "templates/*.yaml"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-markers --cov=raja_sts --cov-report=term-missing --cov-fail-under=95"
+addopts = "-ra --strict-markers --cov=pearls --cov-report=term-missing --cov-fail-under=95"
 testpaths = ["tests"]
 markers = [
   "aws: live AWS authorization proof; skipped unless explicitly enabled",
@@ -72,5 +83,5 @@ select = ["B", "E", "F", "I", "UP"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["raja_sts"]
+packages = ["pearls"]
 ignore_missing_imports = true

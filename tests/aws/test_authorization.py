@@ -22,29 +22,29 @@ import pytest
 from botocore.exceptions import ClientError
 from quilt3 import Package
 
-from raja_sts import SceneHandlerResult, mint, run_scene
+from pearls import SceneHandlerResult, mint, run_scene
 
 pytestmark = [
     pytest.mark.aws,
     pytest.mark.skipif(
-        os.getenv("RAJA_STS_RUN_AWS_PROOF") != "1",
-        reason="set RAJA_STS_RUN_AWS_PROOF=1 for the live authorization proof",
+        os.getenv("PEARLS_RUN_AWS_PROOF") != "1",
+        reason="set PEARLS_RUN_AWS_PROOF=1 for the live authorization proof",
     ),
 ]
 
 _REQUIRED_ENV = (
-    "RAJA_STS_MANIFEST_URI",
-    "RAJA_STS_SCOPE_FILE",
-    "RAJA_STS_ROLE_ARN",
-    "RAJA_STS_CLEANUP_ROLE_ARN",
-    "RAJA_STS_ALLOWED_READ",
-    "RAJA_STS_CROSS_OBJECT_VERSION_READ",
-    "RAJA_STS_WRONG_VERSION_READ",
-    "RAJA_STS_DENIED_READ",
-    "RAJA_STS_WORKFLOW_READ",
-    "RAJA_STS_OUTPUT_LATEST_READ",
-    "RAJA_STS_ALLOWED_WRITE",
-    "RAJA_STS_DENIED_WRITE",
+    "PEARLS_MANIFEST_URI",
+    "PEARLS_SCOPE_FILE",
+    "PEARLS_ROLE_ARN",
+    "PEARLS_CLEANUP_ROLE_ARN",
+    "PEARLS_ALLOWED_READ",
+    "PEARLS_CROSS_OBJECT_VERSION_READ",
+    "PEARLS_WRONG_VERSION_READ",
+    "PEARLS_DENIED_READ",
+    "PEARLS_WORKFLOW_READ",
+    "PEARLS_OUTPUT_LATEST_READ",
+    "PEARLS_ALLOWED_WRITE",
+    "PEARLS_DENIED_WRITE",
 )
 
 
@@ -154,8 +154,8 @@ def _get_and_close(client: Any, target: dict[str, str]) -> dict[str, Any]:
 
 def _assert_proof_targets(scope: dict[str, Any]) -> tuple[str, str]:
     package_name, output_bucket = scope["writable_package"].rsplit("@", 1)
-    allowed_write = _s3_target(os.environ["RAJA_STS_ALLOWED_WRITE"])
-    denied_write = _s3_target(os.environ["RAJA_STS_DENIED_WRITE"])
+    allowed_write = _s3_target(os.environ["PEARLS_ALLOWED_WRITE"])
+    denied_write = _s3_target(os.environ["PEARLS_DENIED_WRITE"])
     assert "VersionId" not in allowed_write and "VersionId" not in denied_write
     assert allowed_write["Bucket"] == output_bucket
     assert allowed_write["Key"].startswith(f"{package_name}/")
@@ -174,35 +174,35 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
     missing = [name for name in _REQUIRED_ENV if not os.getenv(name)]
     assert not missing, f"missing live proof configuration: {', '.join(missing)}"
 
-    scope = json.loads(Path(os.environ["RAJA_STS_SCOPE_FILE"]).read_text(encoding="utf-8"))
+    scope = json.loads(Path(os.environ["PEARLS_SCOPE_FILE"]).read_text(encoding="utf-8"))
     package_name, output_bucket = _assert_proof_targets(scope)
-    scene_id = os.getenv("RAJA_STS_SCENE_ID", "raja-sts-proof")
-    transcript = Path(os.getenv("RAJA_STS_TRANSCRIPT", tmp_path / "aws-proof-transcript.jsonl"))
+    scene_id = os.getenv("PEARLS_SCENE_ID", "pearls-proof")
+    transcript = Path(os.getenv("PEARLS_TRANSCRIPT", tmp_path / "aws-proof-transcript.jsonl"))
     transcript.unlink(missing_ok=True)
 
-    role_arn = os.environ["RAJA_STS_ROLE_ARN"]
-    cleanup_role_arn = os.environ["RAJA_STS_CLEANUP_ROLE_ARN"]
+    role_arn = os.environ["PEARLS_ROLE_ARN"]
+    cleanup_role_arn = os.environ["PEARLS_CLEANUP_ROLE_ARN"]
     assert cleanup_role_arn != role_arn, "cleanup and Scene execution roles must differ"
     baseline_kwargs, baseline_assumed_role_arn = _assume_role(
         role_arn,
         scene_id,
         "baseline",
-        os.getenv("RAJA_STS_EXTERNAL_ID"),
+        os.getenv("PEARLS_EXTERNAL_ID"),
     )
     cleanup_kwargs, cleanup_assumed_role_arn = _assume_role(
         cleanup_role_arn,
         scene_id,
         "cleanup",
-        os.getenv("RAJA_STS_CLEANUP_EXTERNAL_ID"),
+        os.getenv("PEARLS_CLEANUP_EXTERNAL_ID"),
     )
     baseline_s3 = boto3.client("s3", **baseline_kwargs)
     cleanup_s3 = boto3.client("s3", **cleanup_kwargs)
     scoped = mint(
-        os.environ["RAJA_STS_MANIFEST_URI"],
+        os.environ["PEARLS_MANIFEST_URI"],
         scope,
         role_arn=role_arn,
         scene_id=scene_id,
-        external_id=os.getenv("RAJA_STS_EXTERNAL_ID"),
+        external_id=os.getenv("PEARLS_EXTERNAL_ID"),
     )
     scoped_s3 = boto3.client("s3", **scoped.boto3_kwargs())
     _record(
@@ -230,18 +230,18 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
         },
     )
 
-    allowed_read = _s3_target(os.environ["RAJA_STS_ALLOWED_READ"])
-    cross_object_version = _s3_target(os.environ["RAJA_STS_CROSS_OBJECT_VERSION_READ"])
-    wrong_version = _s3_target(os.environ["RAJA_STS_WRONG_VERSION_READ"])
-    denied_read = _s3_target(os.environ["RAJA_STS_DENIED_READ"])
-    workflow_read = _s3_target(os.environ["RAJA_STS_WORKFLOW_READ"])
-    output_latest_read = _s3_target(os.environ["RAJA_STS_OUTPUT_LATEST_READ"])
+    allowed_read = _s3_target(os.environ["PEARLS_ALLOWED_READ"])
+    cross_object_version = _s3_target(os.environ["PEARLS_CROSS_OBJECT_VERSION_READ"])
+    wrong_version = _s3_target(os.environ["PEARLS_WRONG_VERSION_READ"])
+    denied_read = _s3_target(os.environ["PEARLS_DENIED_READ"])
+    workflow_read = _s3_target(os.environ["PEARLS_WORKFLOW_READ"])
+    output_latest_read = _s3_target(os.environ["PEARLS_OUTPUT_LATEST_READ"])
     manifest_read = {
         "Bucket": scoped.compilation.manifest.bucket,
         "Key": f".quilt/packages/{scoped.compilation.manifest.top_hash}",
     }
-    allowed_write = _s3_target(os.environ["RAJA_STS_ALLOWED_WRITE"])
-    denied_write = _s3_target(os.environ["RAJA_STS_DENIED_WRITE"])
+    allowed_write = _s3_target(os.environ["PEARLS_ALLOWED_WRITE"])
+    denied_write = _s3_target(os.environ["PEARLS_DENIED_WRITE"])
     assert allowed_read.get("VersionId")
     assert cross_object_version.get("VersionId") == allowed_read["VersionId"]
     assert (cross_object_version["Bucket"], cross_object_version["Key"]) != (
@@ -417,12 +417,12 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
 
 
 _RUNNER_REQUIRED_ENV = (
-    "RAJA_STS_MANIFEST_URI",
-    "RAJA_STS_RUNNER_SCOPE_FILE",
-    "RAJA_STS_ROLE_ARN",
-    "RAJA_STS_CLEANUP_ROLE_ARN",
-    "RAJA_STS_RUNNER_PROMPT_KEY",
-    "RAJA_STS_ALTERNATE_MODEL_ID",
+    "PEARLS_MANIFEST_URI",
+    "PEARLS_RUNNER_SCOPE_FILE",
+    "PEARLS_ROLE_ARN",
+    "PEARLS_CLEANUP_ROLE_ARN",
+    "PEARLS_RUNNER_PROMPT_KEY",
+    "PEARLS_ALTERNATE_MODEL_ID",
 )
 
 
@@ -431,26 +431,26 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
     missing = [name for name in _RUNNER_REQUIRED_ENV if not os.getenv(name)]
     assert not missing, f"missing live runner proof configuration: {', '.join(missing)}"
 
-    scope = json.loads(Path(os.environ["RAJA_STS_RUNNER_SCOPE_FILE"]).read_text())
+    scope = json.loads(Path(os.environ["PEARLS_RUNNER_SCOPE_FILE"]).read_text())
     assert scope.get("bedrock_model"), "runner scope must select one exact Bedrock model"
     base_package, output_bucket = scope["writable_package"].rsplit("@", 1)
     token = uuid4().hex
     package_name = f"{base_package}/runner-proof-{token}"
     scope["writable_package"] = f"{package_name}@{output_bucket}"
-    scene_id = os.getenv("RAJA_STS_SCENE_ID", "raja-sts-proof") + "-runner"
-    transcript = Path(os.getenv("RAJA_STS_TRANSCRIPT", tmp_path / "aws-proof-transcript.jsonl"))
+    scene_id = os.getenv("PEARLS_SCENE_ID", "pearls-proof") + "-runner"
+    transcript = Path(os.getenv("PEARLS_TRANSCRIPT", tmp_path / "aws-proof-transcript.jsonl"))
 
     cleanup_kwargs, cleanup_assumed_role_arn = _assume_role(
-        os.environ["RAJA_STS_CLEANUP_ROLE_ARN"],
+        os.environ["PEARLS_CLEANUP_ROLE_ARN"],
         scene_id,
         "cleanup",
-        os.getenv("RAJA_STS_CLEANUP_EXTERNAL_ID"),
+        os.getenv("PEARLS_CLEANUP_EXTERNAL_ID"),
     )
     cleanup_s3 = boto3.client("s3", **cleanup_kwargs)
     result = None
 
     def handler(inputs: dict[str, Any], session: Any, context: Any) -> SceneHandlerResult:
-        prompt_key = os.environ["RAJA_STS_RUNNER_PROMPT_KEY"]
+        prompt_key = os.environ["PEARLS_RUNNER_PROMPT_KEY"]
         prompt = inputs[prompt_key].content.decode("utf-8")
         started_at = datetime.now(UTC).isoformat()
         response = session.client("bedrock-runtime").converse(
@@ -472,12 +472,12 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
 
     try:
         result = run_scene(
-            manifest_uri=os.environ["RAJA_STS_MANIFEST_URI"],
+            manifest_uri=os.environ["PEARLS_MANIFEST_URI"],
             scope_spec=scope,
-            role_arn=os.environ["RAJA_STS_ROLE_ARN"],
+            role_arn=os.environ["PEARLS_ROLE_ARN"],
             scene_id=scene_id[:64],
             handler=handler,
-            external_id=os.getenv("RAJA_STS_EXTERNAL_ID"),
+            external_id=os.getenv("PEARLS_EXTERNAL_ID"),
         )
         package = Package.browse(
             package_name,
@@ -510,11 +510,11 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
         )
 
         denial = mint(
-            os.environ["RAJA_STS_MANIFEST_URI"],
+            os.environ["PEARLS_MANIFEST_URI"],
             scope,
-            role_arn=os.environ["RAJA_STS_ROLE_ARN"],
+            role_arn=os.environ["PEARLS_ROLE_ARN"],
             scene_id=f"{scene_id}-alternate"[:64],
-            external_id=os.getenv("RAJA_STS_EXTERNAL_ID"),
+            external_id=os.getenv("PEARLS_EXTERNAL_ID"),
         )
         denied_session = boto3.Session(
             region_name=str(scope["bedrock_model"]).split(":", 5)[3],
@@ -524,7 +524,7 @@ def test_live_bounded_scene_runner_proof(tmp_path: Path) -> None:
             transcript,
             "Converse:alternate-model",
             denied_session.client("bedrock-runtime").converse,
-            modelId=os.environ["RAJA_STS_ALTERNATE_MODEL_ID"],
+            modelId=os.environ["PEARLS_ALTERNATE_MODEL_ID"],
             messages=[{"role": "user", "content": [{"text": "authorization proof"}]}],
         )
     finally:

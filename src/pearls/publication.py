@@ -30,13 +30,13 @@ _REVISION_ID_RE = re.compile(r"^[A-Za-z0-9_+=,.@-]{2,64}$")
 _TOP_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONDITIONAL_ERROR_CODES = frozenset({"ConditionalRequestConflict", "PreconditionFailed"})
 _MISSING_ERROR_CODES = frozenset({"404", "NoSuchKey", "NoSuchObject", "NotFound"})
-_INTENT_DIGEST_META = "raja-intent-sha256"
-_MANIFEST_VERSION_META = "raja-manifest-version-id"
-_PREVIOUS_STATE_META = "raja-previous-state"
-_PREVIOUS_TOP_HASH_META = "raja-previous-top-hash"
-_PREVIOUS_ETAG_META = "raja-previous-etag"
-_PREVIOUS_VERSION_ID_META = "raja-previous-version-id"
-_PUBLISHED_AT_META = "raja-published-at"
+_INTENT_DIGEST_META = "pearls-intent-sha256"
+_MANIFEST_VERSION_META = "pearls-manifest-version-id"
+_PREVIOUS_STATE_META = "pearls-previous-state"
+_PREVIOUS_TOP_HASH_META = "pearls-previous-top-hash"
+_PREVIOUS_ETAG_META = "pearls-previous-etag"
+_PREVIOUS_VERSION_ID_META = "pearls-previous-version-id"
+_PUBLISHED_AT_META = "pearls-published-at"
 
 PublicationStatus = Literal["published", "published-not-latest"]
 PublicationWriteDisposition = Literal["none", "latest-only", "package-writes"]

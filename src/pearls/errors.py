@@ -1,4 +1,4 @@
-"""Public exception hierarchy for :mod:`raja_sts`."""
+"""Public exception hierarchy for :mod:`pearls`."""
 
 from __future__ import annotations
 
@@ -13,55 +13,55 @@ class InvariantFinding:
     message: str
 
 
-class RajaStsError(Exception):
-    """Base class for all expected RAJA STS failures."""
+class PearlsError(Exception):
+    """Base class for all expected Pearls failures."""
 
 
-class InvalidManifestURI(RajaStsError, ValueError):
+class InvalidManifestURI(PearlsError, ValueError):
     """The manifest URI is malformed or does not identify an immutable revision."""
 
 
-class ManifestLoadError(RajaStsError):
+class ManifestLoadError(PearlsError):
     """The pinned Quilt manifest could not be loaded or verified."""
 
 
-class InvalidScopeError(RajaStsError, ValueError):
+class InvalidScopeError(PearlsError, ValueError):
     """The logical read, model, or output scope is invalid."""
 
 
-class PolicySizeError(RajaStsError):
+class PolicySizeError(PearlsError):
     """The compiled inline session policy exceeds the configured STS limit."""
 
 
-class InvalidAssumeRoleRequest(RajaStsError, ValueError):
+class InvalidAssumeRoleRequest(PearlsError, ValueError):
     """The role, session name, or duration cannot be sent safely to STS."""
 
 
-class MintError(RajaStsError):
+class MintError(PearlsError):
     """STS rejected the request or returned an invalid credential response."""
 
 
-class AuthorityModeError(RajaStsError):
+class AuthorityModeError(PearlsError):
     """A Scene runner request does not have exact, version-pinned authority."""
 
 
-class InputIntegrityError(RajaStsError):
+class InputIntegrityError(PearlsError):
     """A selected input could not be read or did not match its sealed digest."""
 
 
-class HandlerContractError(RajaStsError, ValueError):
+class HandlerContractError(PearlsError, ValueError):
     """A Scene handler returned unsafe objects or non-serializable metadata."""
 
 
-class GenesisAuthoringError(RajaStsError, ValueError):
+class GenesisAuthoringError(PearlsError, ValueError):
     """A local genesis tree or authoring declaration is unsafe or ambiguous."""
 
 
-class RuntimeRequirementsError(RajaStsError, ValueError):
+class RuntimeRequirementsError(PearlsError, ValueError):
     """A sealed runtime declaration is malformed or incompatible with this interpreter."""
 
 
-class PublicationError(RajaStsError):
+class PublicationError(PearlsError):
     """The bounded output package could not be published."""
 
 
@@ -69,11 +69,11 @@ class PublicationConflictError(PublicationError):
     """A publication revision identity was reused for different content."""
 
 
-class WorkflowContractError(RajaStsError):
+class WorkflowContractError(PearlsError):
     """The output package does not satisfy the destination registry's workflow contract."""
 
 
-class DomainInvariantError(RajaStsError):
+class DomainInvariantError(PearlsError):
     """Caller-supplied domain invariants refused an output before publication."""
 
     def __init__(self, findings: tuple[InvariantFinding, ...]) -> None:

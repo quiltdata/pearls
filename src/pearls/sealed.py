@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .runner import SceneHandler
 
 HANDLER_ATTRIBUTE = "handler"
-_MODULE_PREFIX = "raja_sts._sealed_handler_"
+_MODULE_PREFIX = "pearls._sealed_handler_"
 
 
 def validate_sealed_handler_source(source: bytes, handler_key: str) -> None:
@@ -209,7 +209,7 @@ def verify_sealed_handler(
     the bytes against the manifest's Quilt content hash, and checks statically
     that they parse and bind a module-level ``handler``. Raises
     :class:`ManifestLoadError` when the revision declares no such entry,
-    :class:`~raja_sts.InputIntegrityError` when the bytes do not match the
+    :class:`~pearls.InputIntegrityError` when the bytes do not match the
     manifest, and :class:`HandlerContractError` when they cannot expose a handler.
 
     Executes no genesis code, calls no STS, invokes no model, and writes nothing,

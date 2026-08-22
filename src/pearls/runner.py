@@ -40,7 +40,7 @@ from .policy import DEFAULT_MAX_POLICY_CHARACTERS, compile
 from .publication import PublicationInvariant, PublicationResult, publish_package
 from .sts import mint_compiled
 
-SCENE_RECORD_SCHEMA = "https://quiltdata.com/schemas/raja-sts/scene-execution/v1"
+SCENE_RECORD_SCHEMA = "https://quiltdata.com/schemas/pearls/scene-execution/v1"
 _RESERVED_KEYS = frozenset({"run/scene.json", "run/invocation.json"})
 _SECRET_KEY_FRAGMENTS = ("access_key", "secret", "session_token", "credential", "password")
 

@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 from conftest import MANIFEST_URI
 
-import raja_sts.runner as runner_module
-from raja_sts import (
+import pearls.runner as runner_module
+from pearls import (
     RUNTIME_REQUIREMENTS_MAX_BYTES,
     RUNTIME_REQUIREMENTS_SCHEMA,
     AuthorityModeError,
@@ -28,7 +28,7 @@ from raja_sts import (
     run_scene,
     run_scene_from_genesis,
 )
-from raja_sts.models import PinnedManifestURI
+from pearls.models import PinnedManifestURI
 
 MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
 ROLE_ARN = "arn:aws:iam::123456789012:role/scene-execution"

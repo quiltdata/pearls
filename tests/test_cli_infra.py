@@ -18,9 +18,9 @@ from cli_support import (
     make_runtime,
 )
 
-from raja_sts.cli import main
-from raja_sts.cli._common import CliRefusal
-from raja_sts.cli._template import load_role_template
+from pearls.cli import main
+from pearls.cli._common import CliRefusal
+from pearls.cli._template import load_role_template
 
 ROLE_NAME = "scene-execution-haiku"
 STACK_ARN = "arn:aws:iam::123456789012:role/scene-execution-haiku"
@@ -205,7 +205,7 @@ def test_validate_checks_the_packaged_template_without_calling_aws() -> None:
 
     assert code == 0
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-infra-validate/v2"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-infra-validate/v2"
     assert payload["status"] == "ok"
     assert payload["template"].endswith("scene-execution-role.yaml")
     assert payload["capabilities"] == ["CAPABILITY_NAMED_IAM"]
@@ -1010,7 +1010,7 @@ def test_status_reports_the_identity_a_deployed_role_grants() -> None:
 
     assert code == 0
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-infra-status/v2"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-infra-status/v2"
     assert payload["stack_status"] == "CREATE_COMPLETE"
     assert payload["identity"] == {
         "role_arn": STACK_ARN,
