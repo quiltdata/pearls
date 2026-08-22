@@ -3,6 +3,19 @@ name: CI
 # One workflow covers checks, distribution build, and release, because the PyPI
 # Trusted Publisher for "pearls" names ci.yml as the publishing workflow.
 #
+# Releases are not tag-triggered. A merge to main publishes when the version in
+# pyproject.toml is one PyPI does not already have; otherwise the release job is
+# skipped. Bumping the version is therefore the whole release action, and an
+# ordinary merge cannot republish or overwrite an existing version, which PyPI
+# would refuse anyway because it accepts a given name and version exactly once.
+#
+# workflow_dispatch runs the same guarded path, for retrying a release whose
+# publish step failed after the version was already merged.
+#
+# The already-published check runs in the distribution job rather than the
+# release job, so a merge that releases nothing never reaches the protected
+# pypi environment and never asks a reviewer to approve a no-op.
+#
 # Prerequisites for publishing, both one-time and both performed by a human:
 #   1. On PyPI, Trusted Publishing for project "pearls" with owner quiltdata,
 #      repository pearls, workflow ci.yml, and environment pypi. No API token
@@ -10,17 +23,11 @@ name: CI
 #      name on the first successful run.
 #   2. In this repository's settings, a "pypi" environment with whatever
 #      reviewers the release should require.
-#
-# The publish job runs only for a pushed v* tag. The tag must match the version
-# in pyproject.toml, and that version must not already exist on PyPI, which
-# accepts a given name and version exactly once. Every other event builds and
-# checks the same artifacts and publishes nothing.
 
 on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +35,9 @@ permissions:
 
 env:
   UV_VERSION: "0.9.17"
+  # Both the release gate's existence check and uv's own duplicate-file check
+  # read this index, so they cannot disagree about what is already published.
+  PYPI_SIMPLE_URL: https://pypi.org/simple/
 
 jobs:
   test:
@@ -55,9 +65,13 @@ jobs:
       - run: pytest
 
   distribution:
-    # Builds the exact artifacts a release would publish and checks them. On a
-    # tag this is also the gate that the tag and the declared version agree.
+    # Builds the exact artifacts a release would publish and checks them, on
+    # every event, so a release is never the first time this path runs. Also
+    # decides, without publishing anything, whether a release is due.
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new: ${{ steps.gate.outputs.new }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -72,15 +86,13 @@ jobs:
           version="$(python3 -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "declared version: ${version}"
-      - name: Refuse a tag that disagrees with the declared version
-        if: github.ref_type == 'tag'
+      - name: Refuse a version with no changelog entry
         env:
           DECLARED: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "${tag}" != "${DECLARED}" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not match pyproject version ${DECLARED}" >&2
+          if ! grep -qF "## [${DECLARED}]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [${DECLARED}]' section" >&2
             exit 1
           fi
       - run: uv build
@@ -97,15 +109,49 @@ jobs:
           /tmp/install-check/bin/python -c "import pearls"
           installed="$(/tmp/install-check/bin/pearls --version)"
           test "${installed}" = "pearls ${DECLARED}"
+      - id: gate
+        name: Decide whether the declared version is new to PyPI
+        env:
+          DECLARED: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o /tmp/releases.json -w '%{http_code}' \
+            -H 'Accept: application/vnd.pypi.simple.v1+json' \
+            "${PYPI_SIMPLE_URL}pearls/")"
+          case "${status}" in
+            200)
+              known="$(python3 -c 'import json;print("\n".join(json.load(open("/tmp/releases.json")).get("versions", [])))')"
+              if printf '%s\n' "${known}" | grep -qxF "${DECLARED}"; then
+                echo "new=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::PyPI already has pearls ${DECLARED}. Bump the version in pyproject.toml to release."
+              else
+                echo "new=true" >> "$GITHUB_OUTPUT"
+                echo "::notice::PyPI does not have pearls ${DECLARED}. A merge to main will publish it."
+              fi
+              ;;
+            404)
+              # The project is unregistered, so the pending Trusted Publisher
+              # claims the name on the first upload.
+              echo "new=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::pearls is unregistered on PyPI. A merge to main will register it."
+              ;;
+            *)
+              echo "unexpected status ${status} from ${PYPI_SIMPLE_URL}pearls/" >&2
+              exit 1
+              ;;
+          esac
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: distribution
           path: dist/
           if-no-files-found: error
 
-  publish:
+  release:
     needs: [test, distribution]
-    if: github.ref_type == 'tag'
+    if: |
+      needs.distribution.outputs.new == 'true'
+      && (github.event_name == 'workflow_dispatch'
+          || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -120,6 +166,14 @@ jobs:
         with:
           name: distribution
           path: dist/
+      # Publishes exactly the artifacts the distribution job built and checked.
       # --trusted-publishing always fails closed rather than falling back to a
       # username, password, or token if the OIDC exchange does not work.
-      - run: uv publish --trusted-publishing always
+      # --check-url makes a re-run skip files the index already has instead of
+      # failing, so a partially completed upload can be finished.
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always --check-url "${PYPI_SIMPLE_URL}pearls/"
+      - name: Summarize the release
+        env:
+          DECLARED: ${{ needs.distribution.outputs.version }}
+        run: echo "::notice::Published pearls ${DECLARED} to PyPI."

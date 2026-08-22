@@ -50,14 +50,17 @@ All notable changes to this project are documented in this file.
   PEP 639 SPDX expression `Apache-2.0`, so both artifacts publish
   `License-Expression: Apache-2.0` under Metadata 2.4 and ship both files. No
   earlier revision stated any license terms.
-- CI now also builds, checks, and releases the distribution. A pushed `v*` tag
-  publishes to PyPI through Trusted Publishing, so no API token is stored in
-  the repository. The release gate refuses a tag that disagrees with the
-  version in `pyproject.toml`, and it verifies that the built wheel installs,
-  imports as `pearls`, and reports the declared version through the `pearls`
-  CLI before anything is uploaded. Every other event builds and checks the
-  same artifacts and publishes nothing. Publishing lives in `ci.yml` rather
-  than a separate workflow because the Trusted Publisher is bound to one
+- CI now also builds, checks, and releases the distribution. Releases are not
+  tag-triggered: a merge to `main` publishes to PyPI through Trusted
+  Publishing when the version in `pyproject.toml` is one PyPI does not already
+  have, and is skipped otherwise, so bumping the version is the whole release
+  action. `workflow_dispatch` runs the same guarded path to retry a failed
+  upload. No API token is stored in the repository. Before any upload, CI
+  refuses a version with no `CHANGELOG.md` section and proves that the built
+  wheel installs, imports as `pearls`, and reports the declared version
+  through the `pearls` CLI. Every event builds and checks the same artifacts,
+  and the release job publishes exactly those. Publishing lives in `ci.yml`
+  rather than a separate workflow because a Trusted Publisher is bound to one
   workflow filename.
 
 ### Known limitations
