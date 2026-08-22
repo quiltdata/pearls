@@ -7,14 +7,14 @@ import pytest
 import quilt3
 from conftest import MANIFEST_URI, TOP_HASH
 
-from raja_sts import InvalidManifestURI, InvalidScopeError, ManifestLoadError
-from raja_sts.manifest import (
+from pearls import InvalidManifestURI, InvalidScopeError, ManifestLoadError
+from pearls.manifest import (
     load_quilt_manifest,
     parse_manifest_uri,
     parse_output_package,
     parse_output_selectors,
 )
-from raja_sts.models import OutputPackage, PinnedManifestURI
+from pearls.models import OutputPackage, PinnedManifestURI
 
 
 @pytest.mark.parametrize(

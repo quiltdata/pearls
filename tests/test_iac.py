@@ -25,13 +25,13 @@ def test_packaged_template_is_byte_identical_to_the_repository_template() -> Non
     deploying a different role than the one reviewed in this repository.
     """
     repository = Path("infra/scene-execution-role.yaml").read_bytes()
-    packaged = Path("src/raja_sts/templates/scene-execution-role.yaml").read_bytes()
+    packaged = Path("src/pearls/templates/scene-execution-role.yaml").read_bytes()
 
     assert packaged == repository
 
 
 def test_installed_template_is_the_one_the_cli_loads() -> None:
-    from raja_sts.cli._template import load_role_template
+    from pearls.cli._template import load_role_template
 
     template = load_role_template()
 

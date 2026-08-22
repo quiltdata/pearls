@@ -79,13 +79,13 @@ The Pearls architecture distinguishes three levels of maturity:
    domain-aware reconciliation).
 
 Release 0.1.1 adds an alpha maturity-level 1→2 authority-compilation
-primitive: `raja_sts` compiles a pinned Quilt Package scope into an AWS STS
+primitive: `pearls` compiles a pinned Quilt Package scope into an AWS STS
 session policy and temporary credentials. It is not a claim that the complete
 Pearls architecture is production-ready.
 
-## AWS-native TAJ (`raja_sts`)
+## AWS-native TAJ (`pearls`)
 
-`raja_sts` is a small Python 3.11+ compiler for minimum-viable Scene
+`pearls` is a small Python 3.11+ compiler for minimum-viable Scene
 isolation. The trusted orchestrator loads one immutable Quilt manifest,
 resolves a sealed logical scope, and passes the resulting minified policy to
 `sts:AssumeRole`. AWS evaluates the temporary credential as the intersection
@@ -99,20 +99,27 @@ ID used for audit correlation.
 ### Install and test
 
 ```console
-python -m pip install .
+# From PyPI, once the distribution is published
+uv tool install pearls   # the pearls CLI on its own
+uv add pearls            # as a project dependency
+
+# From a checkout
+uv venv
+uv pip install .
 
 # Development checks
-python -m pip install ".[dev]"
+uv pip install ".[dev]"
 ruff format --check .
 ruff check .
 mypy
-cfn-lint infra/*.yaml
+cfn-lint infra/*.yaml src/pearls/templates/*.yaml
 pytest
-python -m build
+uv build
 ```
 
 Direct runtime and development dependencies are pinned in `pyproject.toml`;
-transitive resolution remains the installer/index's responsibility. Normal CI
+transitive resolution remains the installer/index's responsibility. There is no
+`uv.lock`, so a checkout resolves the way an ordinary install does. Normal CI
 runs only offline tests and never assumes a role or mutates AWS resources.
 
 ### Pinned manifest and scope contract
@@ -156,7 +163,7 @@ bytes. The runtime must then verify the Quilt content hash after download.
 ### Compile and mint
 
 ```python
-from raja_sts import compile, mint
+from pearls import compile, mint
 
 manifest_uri = "quilt+s3://manifest-bucket#package=project%2Fsealed-scene&top_hash=" + "a" * 64
 scope = {
@@ -199,7 +206,7 @@ passes one explicit scoped session to the handler, and publishes a Quilt output
 Package without listing the bucket:
 
 ```python
-from raja_sts import SceneHandlerResult, run_scene
+from pearls import SceneHandlerResult, run_scene
 
 
 def handler(inputs, session, context):
@@ -235,7 +242,7 @@ caller declares the expected resources, then supplies a loader backed by
 ```python
 import boto3
 
-from raja_sts import load_bedrock_profile_resources
+from pearls import load_bedrock_profile_resources
 
 profile_arn = (
     "arn:aws:bedrock:us-east-1:123456789012:"
@@ -284,11 +291,11 @@ consumer. Prompt and response bodies remain explicit package objects rather
 than implicit metadata.
 
 A caller can compose content-aware checks without adding domain vocabulary to
-`raja_sts`. Each checker has a stable identifier and returns all findings it can
+`pearls`. Each checker has a stable identifier and returns all findings it can
 establish from the final single-revision material:
 
 ```python
-from raja_sts import PublicationContext
+from pearls import PublicationContext
 
 
 class RequiredAssessment:
@@ -369,7 +376,7 @@ The requirements control uses one strict versioned shape:
 
 ```json
 {
-  "$schema": "https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1",
+  "$schema": "https://quiltdata.com/schemas/pearls/handler-runtime-requirements/v1",
   "python": ">=3.11,<3.14",
   "imports": [
     {"module": "PIL", "requirement": "Pillow>=10,<11"},
@@ -403,7 +410,7 @@ install or resolve dependencies, validate ABIs, lock the environment, sandbox
 code, or claim reproducibility.
 
 ```python
-from raja_sts import SceneHandlerResult, run_scene_from_genesis
+from pearls import SceneHandlerResult, run_scene_from_genesis
 
 
 def genesis_handler(inputs, session, context):
@@ -921,30 +928,30 @@ credentials are present.
 Configure an administrator-owned sandbox, then run:
 
 ```console
-export RAJA_STS_RUN_AWS_PROOF=1
-export RAJA_STS_MANIFEST_URI='quilt+s3://...#package=...&top_hash=...'
-export RAJA_STS_SCOPE_FILE="$PWD/examples/scope.json"
-export RAJA_STS_ROLE_ARN='arn:aws:iam::123456789012:role/scene-execution'
-export RAJA_STS_CLEANUP_ROLE_ARN='arn:aws:iam::123456789012:role/scene-proof-cleanup'
-export RAJA_STS_ALLOWED_READ='s3://bucket/key?versionId=expected-version'
+export PEARLS_RUN_AWS_PROOF=1
+export PEARLS_MANIFEST_URI='quilt+s3://...#package=...&top_hash=...'
+export PEARLS_SCOPE_FILE="$PWD/examples/scope.json"
+export PEARLS_ROLE_ARN='arn:aws:iam::123456789012:role/scene-execution'
+export PEARLS_CLEANUP_ROLE_ARN='arn:aws:iam::123456789012:role/scene-proof-cleanup'
+export PEARLS_ALLOWED_READ='s3://bucket/key?versionId=expected-version'
 # A different selected key paired with the expected version ID; S3 must return NoSuchVersion.
-export RAJA_STS_CROSS_OBJECT_VERSION_READ='s3://bucket/other-selected-key?versionId=expected-version'
-export RAJA_STS_WRONG_VERSION_READ='s3://bucket/key?versionId=other-existing-version'
-export RAJA_STS_DENIED_READ='s3://bucket/sibling-control.json?versionId=existing-version'
-export RAJA_STS_WORKFLOW_READ='s3://output-bucket/.quilt/workflows/config.yml'
-export RAJA_STS_OUTPUT_LATEST_READ='s3://output-bucket/.quilt/named_packages/scenes/example/output/latest'
-export RAJA_STS_ALLOWED_WRITE='s3://output-bucket/scenes/example/output/proof.txt'
-export RAJA_STS_DENIED_WRITE='s3://output-bucket/outside-output/proof.txt'
+export PEARLS_CROSS_OBJECT_VERSION_READ='s3://bucket/other-selected-key?versionId=expected-version'
+export PEARLS_WRONG_VERSION_READ='s3://bucket/key?versionId=other-existing-version'
+export PEARLS_DENIED_READ='s3://bucket/sibling-control.json?versionId=existing-version'
+export PEARLS_WORKFLOW_READ='s3://output-bucket/.quilt/workflows/config.yml'
+export PEARLS_OUTPUT_LATEST_READ='s3://output-bucket/.quilt/named_packages/scenes/example/output/latest'
+export PEARLS_ALLOWED_WRITE='s3://output-bucket/scenes/example/output/proof.txt'
+export PEARLS_DENIED_WRITE='s3://output-bucket/outside-output/proof.txt'
 # Runner proof: use a scope with an exact bedrock_model and a disposable output package base.
-export RAJA_STS_RUNNER_SCOPE_FILE="$PWD/examples/scope.json"
-export RAJA_STS_RUNNER_PROMPT_KEY='input-content/prompt.txt'
-export RAJA_STS_ALTERNATE_MODEL_ID='arn:aws:bedrock:us-east-1::foundation-model/another-model'
-export RAJA_STS_TRANSCRIPT="$PWD/evidence/aws-taj/aws-proof-transcript.jsonl"
+export PEARLS_RUNNER_SCOPE_FILE="$PWD/examples/scope.json"
+export PEARLS_RUNNER_PROMPT_KEY='input-content/prompt.txt'
+export PEARLS_ALTERNATE_MODEL_ID='arn:aws:bedrock:us-east-1::foundation-model/another-model'
+export PEARLS_TRANSCRIPT="$PWD/evidence/aws-taj/aws-proof-transcript.jsonl"
 pytest -m aws tests/aws/test_authorization.py
 ```
 
 The cleanup role is sandbox-only and should grant version deletion solely for
-the disposable proof resources. Set `RAJA_STS_CLEANUP_EXTERNAL_ID` if its trust
+the disposable proof resources. Set `PEARLS_CLEANUP_EXTERNAL_ID` if its trust
 policy requires a distinct external ID.
 
 The JSONL transcript preserves operation outcomes, HTTP status codes, AWS
@@ -1033,3 +1040,7 @@ to each stored object version, as documented in
 Quilt manifest loading follows the public
 [`Package.browse`](https://docs.quiltdata.com/api-reference/package) API.
 Content was rephrased for compliance with licensing restrictions.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

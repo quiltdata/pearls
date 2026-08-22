@@ -154,10 +154,10 @@ def _parameter_specs(document: Mapping[str, Any], source: str) -> dict[str, Para
 def load_role_template(template_file: str | None = None) -> RoleTemplate:
     """Load the packaged template, or an explicit ``--template-file`` override."""
     if template_file is None:
-        source = f"raja_sts/templates/{TEMPLATE_RESOURCE}"
+        source = f"pearls/templates/{TEMPLATE_RESOURCE}"
         try:
             body = (
-                resources.files("raja_sts.templates")
+                resources.files("pearls.templates")
                 .joinpath(TEMPLATE_RESOURCE)
                 .read_text(encoding="utf-8")
             )

@@ -1,5 +1,6 @@
 """AWS-native minimum-viable TAJ compiler and bounded Scene runner."""
 
+from ._version import resolve_version
 from .authoring import (
     DEFAULT_GENESIS_WORKFLOW,
     GenesisAuthoringPlan,
@@ -26,10 +27,10 @@ from .errors import (
     InvariantFinding,
     ManifestLoadError,
     MintError,
+    PearlsError,
     PolicySizeError,
     PublicationConflictError,
     PublicationError,
-    RajaStsError,
     RuntimeRequirementsError,
     WorkflowContractError,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "MintError",
     "OutputPackage",
     "OutputSelector",
+    "PearlsError",
     "PinnedManifestURI",
     "PolicySizeError",
     "PublicationConflictError",
@@ -138,7 +140,6 @@ __all__ = [
     "PublicationResult",
     "PublicationStatus",
     "PublicationWriteDisposition",
-    "RajaStsError",
     "RuntimeImportRequirement",
     "RuntimeRequirementCheck",
     "RuntimeRequirements",
@@ -179,4 +180,7 @@ __all__ = [
     "verify_sealed_handler",
 ]
 
-__version__ = "0.1.5"
+# Resolved rather than restated here, so the CLI's --version, the JSON receipts'
+# pearls_version, and the published distribution cannot disagree. See
+# pearls._version for why installed metadata alone is not sufficient.
+__version__ = resolve_version()

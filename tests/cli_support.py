@@ -14,8 +14,8 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from raja_sts.cli import Runtime
-from raja_sts.models import ManifestObject, PinnedManifestURI
+from pearls.cli import Runtime
+from pearls.models import ManifestObject, PinnedManifestURI
 
 TOP_HASH = "b" * 64
 GENESIS_URI = f"quilt+s3://genesis-bucket#package=proj%2Ftrial001-worker&top_hash={TOP_HASH}"
@@ -45,7 +45,7 @@ OUTPUTS_JSON = json.dumps(
 ).encode()
 HANDLER_SOURCE = b'''"""Sealed Trial 001 worker protocol."""
 
-from raja_sts import SceneHandlerResult
+from pearls import SceneHandlerResult
 
 
 def handler(inputs, session, context):
@@ -96,7 +96,7 @@ def manifest_entry(logical_key: str, key: str, content: bytes) -> ManifestObject
 
 RUNTIME_REQUIREMENTS_JSON = json.dumps(
     {
-        "$schema": ("https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1"),
+        "$schema": ("https://quiltdata.com/schemas/pearls/handler-runtime-requirements/v1"),
         "python": ">=3.11",
         "imports": [],
     },

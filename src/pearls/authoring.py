@@ -59,7 +59,7 @@ from .workflows import resolve_workflow_stamp
 
 DEFAULT_GENESIS_WORKFLOW = "genesis"
 _GENESIS_PUBLICATION_INTENT_SCHEMA = (
-    "https://quiltdata.com/schemas/raja-sts/genesis-publication-intent/v1"
+    "https://quiltdata.com/schemas/pearls/genesis-publication-intent/v1"
 )
 _MALFORMED_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _FORBIDDEN_LOGICAL_CHARACTERS = frozenset("*?")

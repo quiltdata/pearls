@@ -24,9 +24,7 @@ README_KEY = "README.md"
 OUTPUTS_KEY = "outputs.json"
 SEALED_HANDLER_KEY = "protocol/handler.py"
 RUNTIME_REQUIREMENTS_KEY = "protocol/requirements.json"
-RUNTIME_REQUIREMENTS_SCHEMA = (
-    "https://quiltdata.com/schemas/raja-sts/handler-runtime-requirements/v1"
-)
+RUNTIME_REQUIREMENTS_SCHEMA = "https://quiltdata.com/schemas/pearls/handler-runtime-requirements/v1"
 INPUT_PREFIX = "input/"
 
 # These limits bound parse/probe work, diagnostics, and receipt growth for an

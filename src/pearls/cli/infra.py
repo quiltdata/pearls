@@ -424,7 +424,7 @@ def _run_cfn_lint(template: RoleTemplate) -> list[str]:
     except ImportError as error:  # pragma: no cover - exercised by the import guard test
         raise CliRefusal(
             "--lint needs cfn-lint, which ships only with the 'dev' extra: "
-            f"pip install 'raja-sts[dev]' ({error})"
+            f"uv pip install 'pearls[dev]' ({error})"
         ) from error
     return [str(match) for match in api.lint_all(template.body)]
 

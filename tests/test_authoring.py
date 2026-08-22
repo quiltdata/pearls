@@ -17,7 +17,7 @@ from authoring_support import (
     write_valid_genesis,
 )
 
-from raja_sts import (
+from pearls import (
     RUNTIME_REQUIREMENTS_MAX_BYTES,
     RUNTIME_REQUIREMENTS_SCHEMA,
     GenesisAuthoringError,
@@ -38,7 +38,7 @@ from raja_sts import (
     prepare_genesis_authoring,
     publish_genesis_authoring,
 )
-from raja_sts.authoring import DEFAULT_GENESIS_WORKFLOW
+from pearls.authoring import DEFAULT_GENESIS_WORKFLOW
 
 
 def _prepare(directory: Path, s3: AuthoringS3, **kwargs: object):
@@ -635,7 +635,7 @@ def test_freeze_wraps_directory_and_file_operating_system_failures(
     def fail_scan(_: object):
         raise OSError("scan denied")
 
-    monkeypatch.setattr("raja_sts.authoring.os.scandir", fail_scan)
+    monkeypatch.setattr("pearls.authoring.os.scandir", fail_scan)
     with pytest.raises(GenesisAuthoringError, match="scan denied"):
         freeze_genesis_directory(tmp_path)
 
@@ -644,7 +644,7 @@ def test_freeze_wraps_directory_and_file_operating_system_failures(
     def fail_open(*_: object, **__: object) -> int:
         raise OSError("open denied")
 
-    monkeypatch.setattr("raja_sts.authoring.os.open", fail_open)
+    monkeypatch.setattr("pearls.authoring.os.open", fail_open)
     with pytest.raises(GenesisAuthoringError, match="open denied"):
         freeze_genesis_directory(tmp_path)
 
@@ -666,7 +666,7 @@ def test_freeze_detects_a_file_replaced_between_discovery_and_open(
         changed[1] += 1
         return os.stat_result(changed)
 
-    monkeypatch.setattr("raja_sts.authoring.os.fstat", changed_fstat)
+    monkeypatch.setattr("pearls.authoring.os.fstat", changed_fstat)
     with pytest.raises(GenesisAuthoringError, match="changed during freeze"):
         freeze_genesis_directory(tmp_path)
 
@@ -695,7 +695,7 @@ def test_freeze_detects_same_inode_mutation_between_discovery_and_open(
             mutated = True
         return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr("raja_sts.authoring.os.open", mutate_before_open)
+    monkeypatch.setattr("pearls.authoring.os.open", mutate_before_open)
 
     with pytest.raises(GenesisAuthoringError, match="changed during freeze"):
         freeze_genesis_directory(tmp_path)
@@ -753,7 +753,7 @@ def test_freeze_detects_same_inode_mutation_during_read(
             return MutatingReader(handle)
         return handle
 
-    monkeypatch.setattr("raja_sts.authoring.os.fdopen", mutating_fdopen)
+    monkeypatch.setattr("pearls.authoring.os.fdopen", mutating_fdopen)
 
     with pytest.raises(GenesisAuthoringError, match="changed during freeze"):
         freeze_genesis_directory(tmp_path)
@@ -874,7 +874,7 @@ def test_root_directory_swap_cannot_escape_the_frozen_tree(
             swapped = True
         return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr("raja_sts.authoring.os.open", swap_before_open)
+    monkeypatch.setattr("pearls.authoring.os.open", swap_before_open)
 
     with pytest.raises(GenesisAuthoringError, match="unable to open|changed during freeze"):
         freeze_genesis_directory(root)
@@ -907,7 +907,7 @@ def test_nested_directory_swap_cannot_escape_the_frozen_tree(
             swapped = True
         return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr("raja_sts.authoring.os.open", swap_child_before_open)
+    monkeypatch.setattr("pearls.authoring.os.open", swap_child_before_open)
 
     with pytest.raises(GenesisAuthoringError, match="unable to open|changed during freeze"):
         freeze_genesis_directory(root)

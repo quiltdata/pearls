@@ -28,13 +28,13 @@ from cli_support import (
     make_runtime,
 )
 
-from raja_sts import (
+from pearls import (
     RUNTIME_REQUIREMENTS_LIMITATIONS,
     RUNTIME_REQUIREMENTS_SCHEMA,
     run_scene_from_genesis,
 )
-from raja_sts.cli import main
-from raja_sts.cli.scene import UNPROVEN_CONDITIONS, generate_scene_id
+from pearls.cli import main
+from pearls.cli.scene import UNPROVEN_CONDITIONS, generate_scene_id
 
 BASE_ARGUMENTS = [
     "--genesis",
@@ -123,7 +123,7 @@ def test_check_passes_and_reports_non_secret_authority() -> None:
 
     assert code == 0
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-check/v2"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-scene-check/v2"
     assert payload["status"] == "ok"
     assert payload["genesis"]["top_hash"] == TOP_HASH
     assert payload["authority"]["mode"] == "per-object-version"
@@ -513,7 +513,7 @@ def test_run_receipt_has_a_stable_versioned_shape_without_secrets() -> None:
     assert harness.run("--json", "--metadata", metadata, "--message", "Trial 001") == 0
 
     payload = harness.streams.json()
-    assert payload["$schema"] == "https://quiltdata.com/schemas/raja-sts/cli-scene-run/v3"
+    assert payload["$schema"] == "https://quiltdata.com/schemas/pearls/cli-scene-run/v3"
     assert payload["status"] == "published"
     assert payload["scene_id"].startswith("scene-2026")
     assert payload["genesis"]["uri"] == GENESIS_URI
@@ -767,7 +767,7 @@ def test_run_validates_authority_and_mints_before_executing_sealed_bytes(
     marker = tmp_path / "executed"
     source = (
         f"open({str(marker)!r}, 'w').close()\n"
-        "from raja_sts import SceneHandlerResult\n\n\n"
+        "from pearls import SceneHandlerResult\n\n\n"
         "def handler(inputs, session, context):\n"
         '    return SceneHandlerResult({"result/answer.txt": "done"}, {})\n'
     ).encode()

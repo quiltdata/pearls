@@ -28,7 +28,7 @@ from ..authoring import (
     prepare_genesis_authoring,
     publish_genesis_authoring,
 )
-from ..errors import RajaStsError
+from ..errors import PearlsError
 from ..manifest import ManifestLoader
 from ..runner import (
     GenesisPreflight,
@@ -42,7 +42,7 @@ EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_USAGE = 2
 
-_SCHEMA_ROOT = "https://quiltdata.com/schemas/raja-sts"
+_SCHEMA_ROOT = "https://quiltdata.com/schemas/pearls"
 SCENE_CHECK_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-check/v2"
 SCENE_RUN_SCHEMA = f"{_SCHEMA_ROOT}/cli-scene-run/v3"
 GENESIS_AUTHOR_SCHEMA = f"{_SCHEMA_ROOT}/cli-genesis-author/v1"
@@ -53,7 +53,7 @@ INFRA_STATUS_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-status/v2"
 INFRA_ASSUME_POLICY_SCHEMA = f"{_SCHEMA_ROOT}/cli-infra-assume-policy/v1"
 
 
-class CliRefusal(RajaStsError):
+class CliRefusal(PearlsError):
     """The command refused to act on the arguments or the operator's answer."""
 
 

@@ -4,6 +4,112 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-08-22
+
+### Security
+
+- **Releases are refused for any ref but `main`.** A PyPI Trusted Publisher
+  matches on owner, repository, workflow filename, and environment, not on the
+  ref, so a `workflow_dispatch` against an unmerged branch could permanently
+  publish code that is not on `main`. The release job now requires
+  `refs/heads/main` for both the push and the dispatch path. 0.2.0 was in fact
+  published this way, deliberately, to register the name before the rename PR
+  merged.
+
+### Fixed
+
+- `pearls.__version__` no longer reports a version belonging to different code.
+  Reading installed distribution metadata removed the drift of a restated
+  literal, but metadata describes the distribution rather than the module that
+  was imported: a source checkout on `sys.path` shadows a differently versioned
+  install, and an editable install's metadata freezes at install time. Version
+  resolution now trusts metadata only when the installed distribution actually
+  contains the imported file, falls back to the checkout's own
+  `pyproject.toml`, and reports `0.0.0+unknown` rather than guessing. This
+  matters because the value is stamped into every JSON receipt as
+  `pearls_version`, where it is a provenance claim.
+
+### Known limitations
+
+- `0.0.0+unknown` is reported for code that neither an installed distribution
+  nor a readable `pyproject.toml` identifies, for instance a package imported
+  from a zip or vendored into another tree. A receipt then records that the
+  version could not be established, which is weaker than a version but not a
+  false one.
+
+## [0.2.0] - 2026-08-21
+
+### Changed
+
+- **Renamed the project to `pearls`:** the distribution is now `pearls`
+  rather than `raja-sts`, and the import package is now `pearls` rather than
+  `raja_sts`. The installed console script was already `pearls` and is
+  unchanged. Nothing was ever published to PyPI under `raja-sts`, so no
+  compatibility alias or deprecation shim exists: `import raja_sts` simply
+  fails. The public API is otherwise identical except for the names below.
+  Earlier entries in this file still refer to `raja_sts`, because that is what
+  those revisions actually shipped.
+- The base exception `RajaStsError` is now `PearlsError`. Every derived error
+  keeps its own name.
+- `pearls.__version__` is now read from the installed distribution metadata
+  instead of being restated in `__init__.py`, so `pearls --version`, the
+  `pearls_version` field in every JSON receipt, and the published distribution
+  cannot disagree. `pyproject.toml` is the single declaration. Imported from an
+  uninstalled source tree it reports `0.0.0+unknown`.
+- Report and receipt `$schema` URIs moved from
+  `https://quiltdata.com/schemas/raja-sts/...` to
+  `https://quiltdata.com/schemas/pearls/...`. Document versions are unchanged,
+  because only the namespace moved, not the shape: scene-execution/v1,
+  handler-runtime-requirements/v1, genesis-publication-intent/v1,
+  cli-scene-check/v2, cli-scene-run/v3, cli-genesis-author/v1,
+  cli-infra-\*/v1 and v2. A consumer matching on the exact URI must be updated.
+- Revision-pointer S3 object metadata keys moved from `raja-*` to `pearls-*`
+  (`pearls-intent-sha256`, `pearls-manifest-version-id`,
+  `pearls-previous-state`, `pearls-previous-top-hash`, `pearls-previous-etag`,
+  `pearls-previous-version-id`, `pearls-published-at`).
+- The live-proof environment variables moved from `RAJA_STS_*` to `PEARLS_*`.
+- Toolchain is uv rather than pip: CI resolves with `uv pip install`, builds
+  with `uv build`, and releases with `uv publish`. No `uv.lock` is added, so
+  direct pins in `pyproject.toml` remain the only dependency declaration and
+  transitive resolution stays the installer's responsibility.
+- `RAJA` still names the authorization component in the architecture
+  documentation. Only the Python distribution, import package, and the
+  identifiers above were renamed.
+
+### Added
+
+- **Apache License 2.0.** The repository now carries the verbatim license text
+  in `LICENSE` and attribution in `NOTICE`. `pyproject.toml` declares it as the
+  PEP 639 SPDX expression `Apache-2.0`, so both artifacts publish
+  `License-Expression: Apache-2.0` under Metadata 2.4 and ship both files. No
+  earlier revision stated any license terms.
+- CI now also builds, checks, and releases the distribution. Releases are not
+  tag-triggered: a merge to `main` publishes to PyPI through Trusted
+  Publishing when the version in `pyproject.toml` is one PyPI does not already
+  have, and is skipped otherwise, so bumping the version is the whole release
+  action. `workflow_dispatch` runs the same guarded path to retry a failed
+  upload. No API token is stored in the repository. Before any upload, CI
+  refuses a version with no `CHANGELOG.md` section and proves that the built
+  wheel installs, imports as `pearls`, and reports the declared version
+  through the `pearls` CLI. Every event builds and checks the same artifacts,
+  and the release job publishes exactly those. Publishing lives in `ci.yml`
+  rather than a separate workflow because a Trusted Publisher is bound to one
+  workflow filename.
+
+### Known limitations
+
+- A revision pointer written by 0.1.x carries `raja-*` metadata, which 0.2.0
+  does not read. A retry of such a publication is refused as recording
+  different intent rather than reconciled as the same intent. This is
+  fail-closed, not silent divergence, but it does mean in-flight 0.1.x
+  publications cannot be resumed by 0.2.0.
+- The name `pearls` was unregistered on PyPI when this entry was written.
+  Registration is only proven by a successful upload, because PyPI also
+  rejects names it considers too similar to an existing project. `pearls-ai` is
+  the fallback if `pearls` is refused.
+- On TestPyPI the name `pearls` belongs to an unrelated project, so the release
+  workflow has no TestPyPI rehearsal path.
+
 ## [0.1.5] - 2026-08-21
 
 ### Added

@@ -1,11 +1,11 @@
-"""Thin one-call Bedrock Converse consumer of :func:`raja_sts.run_scene`."""
+"""Thin one-call Bedrock Converse consumer of :func:`pearls.run_scene`."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
-from raja_sts import SceneContext, SceneHandlerResult, run_scene
+from pearls import SceneContext, SceneHandlerResult, run_scene
 
 
 def _now() -> str:

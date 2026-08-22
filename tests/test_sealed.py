@@ -14,8 +14,8 @@ from cli_support import (
     GenesisFixture,
 )
 
-import raja_sts.sealed as sealed_module
-from raja_sts import (
+import pearls.sealed as sealed_module
+from pearls import (
     HandlerContractError,
     InputIntegrityError,
     ManifestLoadError,
@@ -151,7 +151,7 @@ def test_loaded_handler_executes_the_sealed_bytes() -> None:
 def test_sealed_module_is_registered_under_a_content_addressed_name() -> None:
     sealed = _load(GenesisFixture())
 
-    expected = f"raja_sts._sealed_handler_{sealed.source_sha256[:16]}"
+    expected = f"pearls._sealed_handler_{sealed.source_sha256[:16]}"
     origin = f"<sealed {GENESIS_URI}#protocol/handler.py>"
 
     assert expected in sys.modules
@@ -210,7 +210,7 @@ def test_unusable_sealed_bytes_are_refused(source: bytes, expected: str) -> None
 )
 def test_unusable_sealed_bytes_leave_no_module_registered(source: bytes) -> None:
     """A refusal must not leak a module, and must stay a typed refusal."""
-    name = f"raja_sts._sealed_handler_{hashlib.sha256(source).hexdigest()[:16]}"
+    name = f"pearls._sealed_handler_{hashlib.sha256(source).hexdigest()[:16]}"
 
     with pytest.raises(HandlerContractError):
         _load(GenesisFixture(handler_source=source))

@@ -20,7 +20,7 @@ Before preserving a transcript:
    disposable; the allowed URI must be under the output data prefix and the
    denied URI outside all three output namespaces. The harness removes each
    created proof version with the cleanup role in a `finally` block.
-3. Set `RAJA_STS_TRANSCRIPT` to
+3. Set `PEARLS_TRANSCRIPT` to
    `evidence/aws-taj/aws-proof-transcript.jsonl` and run the command documented
    in the root README.
 4. Inspect every JSONL field before committing. The harness omits credentials

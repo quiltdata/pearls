@@ -4,8 +4,8 @@ from collections.abc import Sequence
 
 import pytest
 
-from raja_sts import ManifestObject
-from raja_sts.models import PinnedManifestURI
+from pearls import ManifestObject
+from pearls.models import PinnedManifestURI
 
 TOP_HASH = "a" * 64
 MANIFEST_URI = f"quilt+s3://manifest-bucket#package=project%2Fscene-input&top_hash={TOP_HASH}"

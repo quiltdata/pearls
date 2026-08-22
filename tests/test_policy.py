@@ -6,8 +6,8 @@ from collections.abc import Sequence
 import pytest
 from conftest import MANIFEST_URI, TOP_HASH
 
-from raja_sts import BedrockInvocation, InvalidScopeError, ManifestObject, PolicySizeError, compile
-from raja_sts.bedrock import (
+from pearls import BedrockInvocation, InvalidScopeError, ManifestObject, PolicySizeError, compile
+from pearls.bedrock import (
     bedrock_model_account,
     bedrock_model_region,
     bedrock_profile_resources_from_response,
@@ -15,7 +15,7 @@ from raja_sts.bedrock import (
     parse_bedrock_invocation,
     parse_bedrock_invocation_declaration,
 )
-from raja_sts.models import CompiledPolicy, PinnedManifestURI
+from pearls.models import CompiledPolicy, PinnedManifestURI
 
 
 def _actions(policy: dict[str, object]) -> set[str]:

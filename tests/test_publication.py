@@ -13,15 +13,15 @@ from quilt3 import Package
 from quilt3.telemetry import ApiTelemetry
 from quilt3.util import QuiltException
 
-from raja_sts import (
+from pearls import (
     DomainInvariantError,
     PublicationConflictError,
     PublicationContext,
     PublicationError,
     WorkflowContractError,
 )
-from raja_sts.models import OutputPackage
-from raja_sts.publication import publish_package
+from pearls.models import OutputPackage
+from pearls.publication import publish_package
 
 
 @dataclass(frozen=True)
@@ -942,13 +942,13 @@ def test_malformed_existing_revision_metadata_is_a_typed_conflict(
     stored = s3.current[key]
     metadata = dict(stored.metadata)
     if mutation == "manifest":
-        metadata.pop("raja-manifest-version-id")
+        metadata.pop("pearls-manifest-version-id")
     elif mutation == "state":
-        metadata["raja-previous-state"] = "unknown"
+        metadata["pearls-previous-state"] = "unknown"
     else:
-        metadata["raja-previous-state"] = "present"
-        metadata["raja-previous-top-hash"] = "bad"
-        metadata["raja-previous-etag"] = '"etag"'
+        metadata["pearls-previous-state"] = "present"
+        metadata["pearls-previous-top-hash"] = "bad"
+        metadata["pearls-previous-etag"] = '"etag"'
     s3.current[key] = _StoredObject(stored.body, stored.version_id, stored.etag, metadata)
     write_count = len(s3.requests)
 
@@ -1187,7 +1187,7 @@ def test_first_publication_refuses_a_same_body_latest_generation_change() -> Non
     assert publication.latest_top_hash == "a" * 64
     assert publication.write_disposition == "package-writes"
     assert s3.current[revision_key].body == publication.top_hash.encode()
-    assert s3.current[revision_key].metadata["raja-previous-version-id"] == "base-version"
+    assert s3.current[revision_key].metadata["pearls-previous-version-id"] == "base-version"
 
 
 def test_first_publication_refuses_a_latest_pointer_deleted_after_its_base_read() -> None:
