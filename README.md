@@ -655,15 +655,16 @@ new execution needs a new ID and reuse is an explicit idempotency assertion.
 `--metadata` takes inline JSON or `@path`, and maps to the workflow-aware caller
 half of `output_meta`; `--message` and `--workflow` / `--no-workflow` map to
 `output_message` and `output_workflow`. The `scene check` receipt schema is v2
-and the run receipt schema is v3. Both include exact requirements-control
+and the run receipt schema is v4. Both include exact requirements-control
 bucket/key/VersionId, Quilt hash, source SHA-256/size, the actual and required
 Python versions, and bounded per-import evidence. Each import records marker
 applicability, distribution-version status, and module-resolution status as
 separate fields; marker-skipped entries are `not-checked`, not “compatible.” A
 summary reports declared, applicable, and skipped counts, and both receipt types
 carry explicit limitations including the unproven distribution-to-module
-association. The run receipt otherwise contains only non-secret identity: Scene
-ID, genesis URI/top hash, verified handler provenance, assumed-role ARN, immutable package URI/top
+association. The run receipt additionally carries the full non-secret compiled
+`authority` report and contains only non-secret identity: Scene ID, genesis
+URI/top hash, verified handler provenance, assumed-role ARN, immutable package URI/top
 hash, revision and S3 version identities, whether the revision was reused,
 `latest` disposition, and timestamps. Its top-level status is `published` or
 `published-not-latest`; either is exit 0 because the revision is durable.
@@ -692,12 +693,15 @@ command claims no sandboxing and no ambient credential isolation.
 | Output Content | `s3:PutObject` is allowed only on the declared data selectors in `<package-name>/` plus the runner-owned records. |
 | Output Control | Quilt manifest writes are limited to `.quilt/packages/*`; named-package writes are limited to `.quilt/named_packages/<package-name>/*`, with exact reads of that package's `latest` pointer and the current Scene ID's revision pointer for CAS and idempotency. Sibling revision pointers remain unreadable. |
 
-The session policy uses plain resource-scoped `Allow` statements. Its intersection
-with the base role excludes actions and resources absent from either policy, so
-it needs no broad wildcard allow plus `Deny`/`NotResource` pair. The policy grants
-no delete, bucket-listing, IAM, STS, ACL, bucket-policy, or input-write action.
-Input policy size is O(source registries), not O(selected objects): each registry
-contributes one common physical prefix. Output write isolation and exact Bedrock
+The session policy uses resource-scoped `Allow` statements plus a standalone
+explicit deny for every `s3:DeleteObject*` and `s3:ListBucket*` action. Its
+intersection with the base role excludes all other actions and resources absent
+from either policy. The policy grants no IAM, STS, ACL, bucket-policy, or
+input-write action. Input policy size is O(source registries), not O(selected
+objects): each registry contributes one common physical prefix. Compilation
+refuses a registry whose selected objects share only the bucket root or whose
+common prefix overlaps `.quilt/`; it never widens those cases to bucket-wide or
+Quilt-metadata read authority. Output write isolation and exact Bedrock
 model/profile scoping are unchanged.
 
 A prefix-scoped credential can read known objects under an admitted source prefix
@@ -920,10 +924,13 @@ opt-in proof against real IAM, STS, and S3. An unrestricted session of the
 same base role first proves that the denied read/version and outside-write
 operations are otherwise allowed, and that even a bare base session cannot
 delete versions. The scoped session then proves an in-scope version read;
-reads of the pinned input manifest, output workflow configuration, and exact
-output `latest` pointer; data, manifest, and named-pointer writes; and denial
-of sibling reads, wrong versions, outside writes, listing, object deletion,
-and version deletion. A separate administrator-managed cleanup role removes
+versioned reads of a wrong existing version inside an admitted prefix; reads of
+the pinned input manifest, output workflow configuration, and exact output
+`latest` pointer; data, manifest, and named-pointer writes; and denial of current
+(unversioned) data reads, reads outside admitted prefixes, outside writes,
+listing, object deletion, and version deletion. `PEARLS_DENIED_READ` must name an
+existing version outside every admitted source prefix; the harness verifies this
+precondition. A separate administrator-managed cleanup role removes
 the exact disposable versions in `finally`; cleanup authority is never present
 on the Scene role or scoped worker. The harness requires versioned disposable
 buckets, does not provision infrastructure, and never runs merely because AWS
@@ -941,7 +948,8 @@ export PEARLS_ALLOWED_READ='s3://bucket/key?versionId=expected-version'
 # A different selected key paired with the expected version ID; S3 must return NoSuchVersion.
 export PEARLS_CROSS_OBJECT_VERSION_READ='s3://bucket/other-selected-key?versionId=expected-version'
 export PEARLS_WRONG_VERSION_READ='s3://bucket/key?versionId=other-existing-version'
-export PEARLS_DENIED_READ='s3://bucket/sibling-control.json?versionId=existing-version'
+# Must reference an existing object version outside every admitted source prefix.
+export PEARLS_DENIED_READ='s3://bucket/outside-prefix/sibling-control.json?versionId=existing-version'
 export PEARLS_WORKFLOW_READ='s3://output-bucket/.quilt/workflows/config.yml'
 export PEARLS_OUTPUT_LATEST_READ='s3://output-bucket/.quilt/named_packages/scenes/example/output/latest'
 export PEARLS_ALLOWED_WRITE='s3://output-bucket/scenes/example/output/proof.txt'

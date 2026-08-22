@@ -41,18 +41,24 @@ def test_compile_maps_logical_scope_to_source_prefixes(
         "input-content/notes.txt",
         "input-control/worker.json",
     ]
-    assert "supervisor" not in result.policy_json
     assert "version-data" not in result.policy_json
     assert "sealed/data.csv" not in result.policy_json
+    admitted_sibling = "arn:aws:s3:::control-bucket/scenes/supervisor.json"
+    assert admitted_sibling.startswith(result.read_prefixes[0].removesuffix("*"))
+    assert admitted_sibling not in result.policy_json
     assert result.policy_json == json.dumps(result.document, separators=(",", ":"), sort_keys=True)
     assert result.size <= 2048
 
     statements = result.document["Statement"]
-    assert not any(item["Effect"] == "Deny" for item in statements)
-    prefix_read = next(item for item in statements if isinstance(item["Action"], list))
+    assert {
+        "Effect": "Deny",
+        "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
+        "Resource": "*",
+    } in statements
+    prefix_read = next(item for item in statements if item["Action"] == "s3:GetObjectVersion")
     assert prefix_read == {
         "Effect": "Allow",
-        "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+        "Action": "s3:GetObjectVersion",
         "Resource": list(result.read_prefixes),
     }
     metadata_read = next(item for item in statements if item["Action"] == "s3:GetObject")
@@ -98,7 +104,7 @@ def test_many_object_scene_policy_is_constant_size_per_source_registry(
     result = compile(
         MANIFEST_URI,
         {
-            "readable": ["input-content/", "input-control/", "rubric/secret.json"],
+            "readable": ["input-content/", "input-control/"],
             "writable_package": "project/scene-output@output-bucket",
             "require_version_ids": True,
         },
@@ -106,22 +112,27 @@ def test_many_object_scene_policy_is_constant_size_per_source_registry(
     )
 
     assert result.mode == "prefix-scoped"
-    assert len(result.selected_objects) == 5
+    assert len(result.selected_objects) == 4
     assert result.read_prefixes == (
-        "arn:aws:s3:::control-bucket/*",
+        "arn:aws:s3:::control-bucket/scenes/*",
         "arn:aws:s3:::input-bucket/sealed/*",
     )
     assert not any(item.version_id in result.policy_json for item in result.selected_objects)
     assert not any(item.arn in result.policy_json for item in result.selected_objects)
 
 
-def test_compile_allows_only_declared_resources_without_broad_denies(
+def test_compile_restores_explicit_delete_and_list_denials(
     manifest_loader, scope_spec: dict[str, object]
 ) -> None:
     result = compile(MANIFEST_URI, scope_spec, manifest_loader=manifest_loader)
     statements = result.document["Statement"]
 
-    assert not any(statement["Effect"] == "Deny" for statement in statements)
+    deny = next(statement for statement in statements if statement["Effect"] == "Deny")
+    assert deny == {
+        "Effect": "Deny",
+        "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
+        "Resource": "*",
+    }
     write = next(statement for statement in statements if statement["Action"] == "s3:PutObject")
     assert write == {
         "Effect": "Allow",
@@ -131,6 +142,7 @@ def test_compile_allows_only_declared_resources_without_broad_denies(
     allowed_actions = {
         action
         for statement in statements
+        if statement["Effect"] == "Allow"
         for action in (
             statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
         )
@@ -151,7 +163,7 @@ def test_compile_is_deterministic(manifest_loader, scope_spec: dict[str, object]
     assert first.report()["writable_package"] == "project/scene-output@output-bucket"
 
 
-def test_exact_selector_does_not_include_sibling_control_files(manifest_loader) -> None:
+def test_exact_selector_admits_its_physical_directory_siblings(manifest_loader) -> None:
     result = compile(
         MANIFEST_URI,
         {
@@ -161,6 +173,10 @@ def test_exact_selector_does_not_include_sibling_control_files(manifest_loader) 
         manifest_loader=manifest_loader,
     )
     assert [item.logical_key for item in result.selected_objects] == ["input-control/worker.json"]
+    assert result.read_prefixes == ("arn:aws:s3:::control-bucket/scenes/*",)
+    sibling_arn = "arn:aws:s3:::control-bucket/scenes/supervisor.json"
+    assert sibling_arn.startswith(result.read_prefixes[0].removesuffix("*"))
+    assert sibling_arn not in result.policy_json
 
 
 def test_selector_without_trailing_slash_can_select_a_directory(manifest_loader) -> None:
@@ -199,7 +215,7 @@ def test_single_mode_still_requires_versions_when_requested(manifest_loader) -> 
     def add_unversioned(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
         return (
             *manifest_loader(manifest),
-            ManifestObject("legacy/data", "input-bucket", "legacy/data", None),
+            ManifestObject("legacy/data", "input-bucket", "sealed/legacy/data", None),
         )
 
     scope = {
@@ -208,10 +224,42 @@ def test_single_mode_still_requires_versions_when_requested(manifest_loader) -> 
     }
     compiled = compile(MANIFEST_URI, scope, manifest_loader=add_unversioned)
     assert compiled.mode == "prefix-scoped"
-    assert compiled.read_prefixes == ("arn:aws:s3:::input-bucket/*",)
+    assert compiled.read_prefixes == ("arn:aws:s3:::input-bucket/sealed/*",)
     scope["require_version_ids"] = True
     with pytest.raises(InvalidScopeError, match="legacy/data"):
         compile(MANIFEST_URI, scope, manifest_loader=add_unversioned)
+
+
+@pytest.mark.parametrize(
+    ("keys", "message"),
+    [
+        (("first.txt", "second.txt"), "bucket-root"),
+        ((".quilt/packages/a", ".quilt/packages/b"), "reserved .quilt/"),
+    ],
+)
+def test_compile_refuses_unsafe_common_source_prefixes(keys: tuple[str, str], message: str) -> None:
+    def unsafe_loader(_: PinnedManifestURI) -> Sequence[ManifestObject]:
+        return tuple(
+            ManifestObject(
+                logical_key=f"input/{index}.txt",
+                bucket="input-bucket",
+                key=key,
+                version_id=f"version-{index}",
+                hash_type="SHA256",
+                hash_value=str(index) * 64,
+            )
+            for index, key in enumerate(keys, start=1)
+        )
+
+    with pytest.raises(InvalidScopeError, match=message):
+        compile(
+            MANIFEST_URI,
+            {
+                "readable": ["input/"],
+                "writable_package": "project/output@output-bucket",
+            },
+            manifest_loader=unsafe_loader,
+        )
 
 
 @pytest.mark.parametrize(

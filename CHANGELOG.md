@@ -4,7 +4,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.2.2] - 2026-08-22
+## [0.3.0] - 2026-08-22
 
 ### Changed
 
@@ -13,10 +13,19 @@ All notable changes to this project are documented in this file.
   ARNs and VersionIds. The four per-object/mixed/prefix policy modes and
   `allow_prefix_fallback` are removed; every compilation reports
   `mode="prefix-scoped"` and its admitted prefixes.
-- Session policies now use plain resource-scoped allows for input reads, exact
-  Quilt metadata reads, output writes, bucket-versioning checks, and Bedrock
-  invocation. The broad allows paired with `Deny`/`NotResource` guardrails were
-  removed because the session policy already intersects with the base role.
+- Session policies now use resource-scoped allows for versioned input reads,
+  exact Quilt metadata reads, output writes, bucket-versioning checks, and
+  Bedrock invocation. A standalone explicit deny preserves defense in depth for
+  every object-delete and bucket-list action without restoring the former broad
+  wildcard allow plus `Deny`/`NotResource` construction.
+- Unsafe common-prefix compilation now fails closed: selected source objects
+  that share only a bucket root or require a `.quilt/` metadata prefix are
+  refused rather than receiving bucket-wide or metadata-namespace authority.
+  Prefix authority grants only `s3:GetObjectVersion`; current Quilt metadata
+  reads remain exact.
+- The breaking policy-mode and scope-grammar changes ship as 0.3.0. The
+  `scene run` JSON receipt advances to schema v4 and now includes the complete
+  non-secret compiled authority report.
 - GitHub Actions now pins `actions/checkout` v5, removing the Node 20
   deprecation warning emitted by the v4 runtime.
 - Runner preflight now rejects missing or unsupported input integrity metadata

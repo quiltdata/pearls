@@ -92,10 +92,10 @@ def mint_compiled(
             compilation=compilation,
         )
     except Exception as error:
-        response = getattr(error, "response", None)
+        error_response = getattr(error, "response", None)
         error_code = None
-        if isinstance(response, Mapping):
-            details = response.get("Error")
+        if isinstance(error_response, Mapping):
+            details = error_response.get("Error")
             if isinstance(details, Mapping):
                 error_code = details.get("Code")
         if error_code == "PackedPolicyTooLarge":
@@ -103,7 +103,7 @@ def mint_compiled(
                 "STS rejected the compressed session policy for "
                 f"{len(compilation.selected_objects)} selected object(s) across "
                 f"{len(compilation.read_prefixes)} read prefix(es); plaintext size "
-                f"{compilation.size} characters"
+                f"{compilation.size} of {DEFAULT_MAX_POLICY_CHARACTERS} characters"
             ) from error
         raise MintError(f"Unable to mint scoped STS credentials: {error}") from error
 

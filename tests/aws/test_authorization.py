@@ -258,6 +258,12 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
     assert allowed_read["Bucket"] == wrong_version["Bucket"]
     assert allowed_read["Key"] == wrong_version["Key"]
     assert allowed_read["VersionId"] != wrong_version["VersionId"]
+    assert denied_read.get("VersionId")
+    denied_read_arn = f"arn:aws:s3:::{denied_read['Bucket']}/{denied_read['Key']}"
+    assert not any(
+        denied_read_arn.startswith(prefix.removesuffix("*"))
+        for prefix in scoped.compilation.read_prefixes
+    ), "PEARLS_DENIED_READ must be outside every admitted source prefix"
     assert workflow_read["Bucket"] == output_bucket
     assert workflow_read["Key"].startswith(".quilt/workflows/")
     assert output_latest_read == {
@@ -331,15 +337,12 @@ def test_live_scene_authorization_proof(tmp_path: Path) -> None:
             scoped_s3.get_object,
             **cross_object_version,
         )
-        current = _get_and_close(
-            scoped_s3,
-            {"Bucket": allowed_read["Bucket"], "Key": allowed_read["Key"]},
-        )
-        _record(
+        _expect_denied(
             transcript,
             "GetObject:selected-current-version-inside-prefix",
-            "allowed",
-            _response_details(current),
+            scoped_s3.get_object,
+            Bucket=allowed_read["Bucket"],
+            Key=allowed_read["Key"],
         )
         for operation, target in (
             (

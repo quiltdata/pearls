@@ -139,7 +139,10 @@ def test_mint_wraps_sts_failures(manifest_loader, scope_spec: dict[str, object])
 
     with pytest.raises(
         PackedPolicyTooLargeError,
-        match=r"3 selected object\(s\) across 2 read prefix\(es\)",
+        match=(
+            rf"3 selected object\(s\) across 2 read prefix\(es\); plaintext size "
+            rf"{compilation.size} of 2048 characters"
+        ),
     ):
         mint_compiled(
             compilation,

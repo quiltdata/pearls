@@ -130,6 +130,7 @@ class SceneRunResult:
     scene_id: str
     output_package: OutputPackage
     publication: PublicationResult
+    compilation: CompiledPolicy
     assumed_role_arn: str
     started_at: datetime
     completed_at: datetime
@@ -390,6 +391,7 @@ def _execute_compiled_scene(
         scene_id=scene_id,
         output_package=compilation.output_package,
         publication=publication,
+        compilation=compilation,
         assumed_role_arn=credentials.assumed_role_arn,
         started_at=started_at,
         completed_at=completed_at,

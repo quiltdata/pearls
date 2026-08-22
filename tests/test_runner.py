@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -315,6 +316,8 @@ def test_run_scene_executes_one_bounded_lifecycle_and_publishes_records() -> Non
     assert result.publication.revision_id == "scene-3"
     assert result.publication.status == "published"
     assert result.publication.is_latest
+    assert result.compilation.mode == "prefix-scoped"
+    assert result.compilation.report()["read_prefixes"] == ["arn:aws:s3:::input-bucket/sealed/*"]
     assert result.assumed_role_arn.endswith("/scene-3")
     assert result.package_uri.endswith(f"&top_hash={result.top_hash}")
     manifest = by_key[keys[-3]].decode().splitlines()
@@ -366,11 +369,77 @@ def test_runner_rejects_missing_hash_before_read() -> None:
         item = loader(PinnedManifestURI("manifest-bucket", "x", "a" * 64, MANIFEST_URI))[0]
         return (ManifestObject(item.logical_key, item.bucket, item.key, item.version_id),)
 
-    with pytest.raises(AuthorityModeError, match="lacks a version ID or content hash"):
+    with pytest.raises(AuthorityModeError, match="lacks a valid version ID or content hash"):
         _execute(
             handler=lambda *_: SceneHandlerResult({"result.txt": b"x"}, {}),
             loader=missing_hash,
         )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"version_id": ""},
+        {"version_id": "null"},
+        {"version_id": 42},
+        {"version_id": "bad\nversion"},
+        {"version_id": "bad${version}"},
+        {"hash_type": 42},
+        {"hash_value": ""},
+        {"hash_value": 42},
+        {"hash_value": "g" * 64},
+        {"hash_type": "sha2-256-chunked", "hash_value": "not-base64"},
+        {"hash_type": "sha2-256-chunked", "hash_value": "AAAAAAAAAAA="},
+        {"hash_type": "CRC64NVME", "hash_value": "A" * 43 + "="},
+    ],
+)
+def test_runner_rejects_malformed_integrity_descriptor_shapes_before_mint(
+    updates: dict[str, object],
+) -> None:
+    events: list[str] = []
+    valid_loader = _loader(events)
+
+    def malformed_loader(manifest: PinnedManifestURI) -> Sequence[ManifestObject]:
+        item = valid_loader(manifest)[0]
+        return (replace(item, **updates),)
+
+    with pytest.raises(AuthorityModeError, match="version ID|content hash"):
+        run_scene(
+            manifest_uri=MANIFEST_URI,
+            scope_spec=_scope(require_versions=False),
+            role_arn=ROLE_ARN,
+            scene_id="scene-3",
+            handler=lambda *_: SceneHandlerResult({"result.txt": b"x"}, {}),
+            manifest_loader=malformed_loader,
+            sts_client=FakeSTS(events),
+        )
+    assert "mint" not in events
+
+
+def test_runner_rejects_forged_policy_mode_before_mint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    compilation = runner_module.compile(
+        MANIFEST_URI,
+        _scope(),
+        manifest_loader=_loader(events),
+        include_manifest_read=False,
+        output_revision_id="scene-3",
+    )
+    forged = replace(compilation, mode="per-object")
+    monkeypatch.setattr(runner_module, "compile", lambda *args, **kwargs: forged)
+
+    with pytest.raises(AuthorityModeError, match="requires prefix-scoped authority"):
+        run_scene(
+            manifest_uri=MANIFEST_URI,
+            scope_spec=_scope(),
+            role_arn=ROLE_ARN,
+            scene_id="scene-3",
+            handler=lambda *_: SceneHandlerResult({"result.txt": b"x"}, {}),
+            sts_client=FakeSTS(events),
+        )
+    assert "mint" not in events
 
 
 @pytest.mark.parametrize(
@@ -636,10 +705,14 @@ def test_run_scene_from_genesis_derives_prompt_read_and_write_scope() -> None:
     prefix_read = next(
         statement
         for statement in policy["Statement"]
-        if statement.get("Action") == ["s3:GetObject", "s3:GetObjectVersion"]
+        if statement.get("Action") == "s3:GetObjectVersion"
     )
     assert prefix_read["Resource"] == ["arn:aws:s3:::input-bucket/sealed/*"]
-    assert not any(statement["Effect"] == "Deny" for statement in policy["Statement"])
+    assert {
+        "Effect": "Deny",
+        "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
+        "Resource": "*",
+    } in policy["Statement"]
     assert result.output_package.name == "project/scene-output"
 
 

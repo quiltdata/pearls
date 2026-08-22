@@ -420,7 +420,8 @@ def check_command(runtime: Runtime, args: argparse.Namespace) -> int:
     record(
         "session-policy-compiled",
         _LOCAL,
-        f"{compilation.mode} authority; {compilation.size} serialized characters; "
+        f"{compilation.mode} authority; {compilation.size} of "
+        f"{DEFAULT_MAX_POLICY_CHARACTERS} serialized characters; "
         f"{len(compilation.read_prefixes)} source prefix(es)",
     )
 
@@ -501,6 +502,7 @@ def _receipt(
             "genesis": _genesis_document(genesis),
             "handler": sealed.report(),
             "runtime_requirements": requirements.report(),
+            "authority": result.compilation.report(),
             "role_arn": args.role_arn,
             "model_arn": invocation.selected_model_id,
             "model": invocation.report(),

@@ -153,8 +153,6 @@ def _bedrock_statements(invocation: BedrockInvocation | None) -> list[dict[str, 
 
 def _directory_prefix(keys: Sequence[str]) -> str:
     """Return a common S3 directory prefix, never a partial path component."""
-    if not keys:
-        return ""
     shared = commonprefix(list(keys))
     if "/" not in shared:
         return ""
@@ -170,6 +168,16 @@ def _read_prefix_resources(objects: Sequence[ManifestObject]) -> tuple[str, ...]
     resources: list[str] = []
     for bucket in sorted(by_bucket):
         prefix = _directory_prefix(sorted(by_bucket[bucket]))
+        if not prefix:
+            raise InvalidScopeError(
+                f"selected objects in source bucket {bucket!r} have no bounded common directory "
+                "prefix; refusing bucket-root read authority"
+            )
+        if prefix.startswith(".quilt/"):
+            raise InvalidScopeError(
+                f"selected objects in source bucket {bucket!r} require common prefix "
+                f"{prefix!r}, which overlaps the reserved .quilt/ metadata namespace"
+            )
         resources.append(f"arn:aws:s3:::{bucket}/{prefix}*")
     return tuple(resources)
 
@@ -177,23 +185,24 @@ def _read_prefix_resources(objects: Sequence[ManifestObject]) -> tuple[str, ...]
 def _read_statements(
     prefix_resources: Sequence[str], metadata_resources: Sequence[str]
 ) -> list[dict[str, Any]]:
-    """Allow prefix reads for data and exact current reads for Quilt metadata."""
-    statements: list[dict[str, Any]] = [
+    """Allow versioned data reads and exact current Quilt metadata reads."""
+    return [
         {
             "Effect": "Allow",
-            "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+            "Action": "s3:GetObjectVersion",
             "Resource": list(prefix_resources),
-        }
+        },
+        {
+            "Effect": "Allow",
+            "Action": "s3:GetObject",
+            "Resource": _deduplicate(metadata_resources),
+        },
+        {
+            "Effect": "Deny",
+            "Action": ["s3:DeleteObject*", "s3:ListBucket*"],
+            "Resource": "*",
+        },
     ]
-    if metadata_resources:
-        statements.append(
-            {
-                "Effect": "Allow",
-                "Action": "s3:GetObject",
-                "Resource": _deduplicate(metadata_resources),
-            }
-        )
-    return statements
 
 
 def _write_statement(output: OutputPackage) -> dict[str, Any]:
