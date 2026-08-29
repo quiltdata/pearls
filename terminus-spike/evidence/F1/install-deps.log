@@ -1,0 +1,36 @@
+mkdir -p .deps/tus
+git clone --depth 1 --branch v0.0.17 https://github.com/terminusdb-org/tus.git .deps/tus 2> /dev/null || git -C .deps/tus pull --quiet
+LANG=C.UTF-8 swipl \
+	  --on-error=halt \
+	  --on-warning=halt \
+	  -g "pack_remove(tus)" \
+	  -g "pack_install('file:///Users/ernest/QuiltSync/proj/260803-pearls/repos/terminusdb/.deps/tus', [interactive(false)])" \
+	  -g "pack_info(tus)" \
+	  -g halt
+% pack `tus' does not exist
+Cloning into '/Users/ernest/.local/share/swi-prolog/pack/tus'...
+Note: switching to '033ab8fd46db0b7b29bdfc7f038cde30eac22a1d'.
+% 
+% You are in 'detached HEAD' state. You can look around, make experimental
+% changes and commit them, and you can discard any commits you make in this
+% state without impacting any branches by switching back to a branch.
+% 
+% If you want to create a new branch to retain commits you create, you may
+% do so (now or later) by using -c with the switch command. Example:
+% 
+%   git switch -c <new-branch-name>
+% 
+% Or undo this operation with:
+% 
+%   git switch -
+% 
+% Turn off this advice by setting config variable advice.detachedHead to false
+% 
+% Contacting server at https://www.swi-prolog.org/pack/query ... ok
+% Package:                     tus
+% Title:                       TUS file transport protocol in prolog
+% Installed version:           0.0.17
+% Automatic (dependency only): false
+% Installed in directory:      /Users/ernest/.local/share/swi-prolog/pack/tus
+% Home page:                   https://github.com/terminusdb/tus
+% Provided libraries:          tus

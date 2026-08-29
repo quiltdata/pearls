@@ -1,0 +1,3 @@
+=== create role ===
+"terminusdb://system/data/Role/spike_limited_role"
+HTTP_STATUS:200

@@ -1,0 +1,14 @@
+=== create user for E5 ===
+"terminusdb://system/data/User/e5_user"
+HTTP_STATUS:200
+=== create db under org spikeorg ===
+{"@type":"api:DbCreateErrorResponse","api:error": {"@type":"api:UnknownOrganizationName","api:organization_name":"spikeorg"},"api:message":"Unknown organization name: spikeorg","api:request_id":"f0c83ed8-905b-11f1-987e-078a6c19a8ff","api:status":"api:not_found"}
+HTTP_STATUS:404
+=== create organization ===
+{
+  "code":405,
+  "location":"/api/organizations",
+  "message":"Method not allowed: POST",
+  "method":"POST"
+}
+HTTP_STATUS:405
