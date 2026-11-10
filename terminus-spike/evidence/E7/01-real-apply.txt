@@ -1,0 +1,6 @@
+=== apply real delta with extra commit_info keys onto e6 ===
+{"@type":"api:ApplyResponse","api:status":"api:success"}
+HTTP_STATUS:200
+=== log after real apply ===
+[ {"@id":"ValidCommit/2j7rbzbud1ijh86eqtzp8s3ejxz09cr","@type":"ValidCommit","author":"spike","identifier":"2j7rbzbud1ijh86eqtzp8s3ejxz09cr","instance":"layer_data:Layer_0941d1aaeb6cfb3535c2efc984d8cac10f86cbba011bac6ec3c5ea616dbe73b2","message":"e7-provenance-real","parent":"ValidCommit/r9guzsnfn0rmab2b37ep6et2pwl8u9r","schema":"layer_data:Layer_91f050cbd4905b68dba3c2d8d9623790ac7e844c9dd95d26937d86fe45745272","timestamp":1785886059.33938339134758826455,"user":"terminusdb://system/data/User/admin"} ]
+HTTP_STATUS:200

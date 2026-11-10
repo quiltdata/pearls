@@ -1,0 +1,9 @@
+=== Step 2: write again with stale header V0 ===
+HTTP/1.1 400 Bad Request
+Date: Tue, 04 Aug 2026 23:22:02 GMT
+Connection: Keep-Alive
+Content-Type: application/json; charset=UTF-8
+Content-Length: 398
+
+{"@type":"api:ReplaceDocumentErrorResponse","api:error": {"@type":"api:DataVersionMismatch","api:actual_data_version":"branch:cn2a3wyayvusfholgui8fsermlehe9a","api:requested_data_version":"branch:jomeio4x95rlw5e2nuaawgp1qepuvwv"},"api:message":"Requested data version in header does not match actual data version.","api:request_id":"4cb848ba-905b-11f1-a84a-5ffa5f5ed3ff","api:status":"api:failure"}
+HTTP_STATUS:400

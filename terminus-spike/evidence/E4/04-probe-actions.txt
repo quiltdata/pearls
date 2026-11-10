@@ -1,0 +1,35 @@
+=== document read ===
+{"@id":"Product/Widget","@type":"Product","name":"Widget","price":15,"stock":5}
+
+HTTP_STATUS:200
+=== document write ===
+["terminusdb:///data/Product/Widget" ]
+
+HTTP_STATUS:200
+=== branch create ===
+{"@type":"api:BranchResponse","api:status":"api:success"}
+HTTP_STATUS:200
+=== /api/diff ===
+{"@after":"admin/spike/local/branch/feature","@before":"admin/spike/local/branch/main","@op":"SwapValue"}
+HTTP_STATUS:200
+=== /api/log ===
+{"action":"'@schema':'Action/meta_read_access'","api:message":"Access to 'UserDatabase/jWtGC4Fglse2_puC' is not authorised with action '@schema':'Action/meta_read_access' and auth 'terminusdb://system/data/User/spike_limited_user'","api:status":"api:forbidden","auth":"'terminusdb://system/data/User/spike_limited_user'","scope":"'UserDatabase/jWtGC4Fglse2_puC'"}
+HTTP_STATUS:403
+=== /api/apply (no-op, before=after=main tip) ===
+{"@type":"api:ApplyResponse","api:status":"api:success"}
+HTTP_STATUS:200
+=== /api/squash ===
+{"@type":"api:SquashResponse","api:commit":"admin/spike/local/commit/yjbzy69b3n8mcv1pqzxmpvoiopdmcsp","api:old_commit":"admin/spike/local/commit/oj7nneckpibxeqpi9cnj6xmt732ao1s","api:status":"api:success"}
+HTTP_STATUS:200
+=== /api/reset ===
+{"action":"'@schema':'Action/commit_read_access'","api:message":"Access to 'UserDatabase/jWtGC4Fglse2_puC' is not authorised with action '@schema':'Action/commit_read_access' and auth 'terminusdb://system/data/User/spike_limited_user'","api:status":"api:forbidden","auth":"'terminusdb://system/data/User/spike_limited_user'","scope":"'UserDatabase/jWtGC4Fglse2_puC'"}
+HTTP_STATUS:403
+=== /api/rebase ===
+{"action":"'@schema':'Action/commit_read_access'","api:message":"Access to 'UserDatabase/jWtGC4Fglse2_puC' is not authorised with action '@schema':'Action/commit_read_access' and auth 'terminusdb://system/data/User/spike_limited_user'","api:status":"api:forbidden","auth":"'terminusdb://system/data/User/spike_limited_user'","scope":"'UserDatabase/jWtGC4Fglse2_puC'"}
+HTTP_STATUS:403
+=== /api/capabilities (list/self) ===
+{"action":"'@schema':'Action/manage_capabilities'","api:message":"Access to 'terminusdb://system/data/UserDatabase/jWtGC4Fglse2_puC' is not authorised with action '@schema':'Action/manage_capabilities' and auth 'terminusdb://system/data/User/spike_limited_user'","api:status":"api:forbidden","auth":"'terminusdb://system/data/User/spike_limited_user'","scope":"'terminusdb://system/data/UserDatabase/jWtGC4Fglse2_puC'"}
+HTTP_STATUS:403
+=== database delete ===
+{"action":"'@schema':'Action/create_database'","api:message":"Access to 'terminusdb://system/data/Organization/admin' is not authorised with action '@schema':'Action/create_database' and auth 'terminusdb://system/data/User/spike_limited_user'","api:status":"api:forbidden","auth":"'terminusdb://system/data/User/spike_limited_user'","scope":"'terminusdb://system/data/Organization/admin'"}
+HTTP_STATUS:403

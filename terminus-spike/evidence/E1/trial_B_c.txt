@@ -1,0 +1,29 @@
+=== Trial B / Variant c ===
+--- reset main and feature to C0 (jomeio4x95rlw5e2nuaawgp1qepuvwv) ---
+{"@type":"api:ResetResponse","api:status":"api:success"}
+{"@type":"api:ResetResponse","api:status":"api:success"}
+--- PUT main: price=12.99 stock=5 ---
+["terminusdb:///data/Product/Widget" ]
+
+--- PUT feature: price=14.99 stock=5 ---
+["terminusdb:///data/Product/Widget" ]
+
+main_tip=9ayzjndtl8d5k7tt9094nkzlrus4eon
+feature_tip=7cptrbntaf8mui040n39eccd5de7s10
+before_commit variant (c) = ''
+--- POST /api/apply/admin/spike/local/branch/main ---
+REQUEST BODY: {"after_commit":"7cptrbntaf8mui040n39eccd5de7s10","commit_info":{"author":"spike","message":"apply-B_c"},"type":"instance"}
+{"@type":"api:BadAPIDocumentErrorResponse","api:error": {"@type":"api:RequiredFieldsMissing","api:document": {"after_commit":"7cptrbntaf8mui040n39eccd5de7s10","commit_info": {"author":"spike","message":"apply-B_c"},"type":"instance"},"api:expected": ["before_commit", "after_commit", "commit_info", "type" ]},"api:message":"The input API document was missing required fields: [before_commit,after_commit,commit_info,type]","api:status":"api:failure"}
+HTTP_STATUS:400
+---headers---
+HTTP/1.1 400 Bad Request
+Date: Tue, 04 Aug 2026 23:21:13 GMT
+Connection: Keep-Alive
+Content-Type: application/json; charset=UTF-8
+Content-Length: 450
+
+
+--- read back main/Product/Widget ---
+{"@id":"Product/Widget","@type":"Product","name":"Widget","price":12.99,"stock":5}
+
+=== end B_c ===

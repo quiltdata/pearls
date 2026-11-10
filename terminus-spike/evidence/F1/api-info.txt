@@ -1,0 +1,2 @@
+{"@type":"api:InfoResponse","api:info": {"authority":"terminusdb://system/data/User/admin","storage": {"version":"2"},"terminusdb": {"git_hash":"a08d9ff2ad981ba7f7d99620d134ef598a36fc3f","version":"12.0.6"},"terminusdb_store": {"version":"0.19.8"}},"api:status":"api:success"}
+HTTP_STATUS:200

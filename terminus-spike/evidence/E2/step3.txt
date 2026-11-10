@@ -1,0 +1,11 @@
+=== Step 3: write with NO Data-Version header ===
+HTTP/1.1 200 OK
+Date: Tue, 04 Aug 2026 23:22:06 GMT
+Connection: Keep-Alive
+Terminusdb-Data-Version: branch:v03pxfc4qe0tiy0dudax0yijwd9thy6
+Content-Type: application/json; charset=UTF-8
+Content-Length: 39
+
+["terminusdb:///data/Product/Widget" ]
+
+HTTP_STATUS:200

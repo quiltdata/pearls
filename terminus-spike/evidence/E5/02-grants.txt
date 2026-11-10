@@ -1,0 +1,6 @@
+=== grant admin_role (write-capable) to e5_user at ORG level (Organization/admin) ===
+{"@type":"api:CapabilityResponse","api:status":"api:success"}
+HTTP_STATUS:200
+=== grant consumer (read-only) role to e5_user at DB level (spike db) ===
+{"@type":"api:CapabilityResponse","api:status":"api:success"}
+HTTP_STATUS:200

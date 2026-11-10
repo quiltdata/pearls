@@ -1,0 +1,5 @@
+% TerminusDB server started at Tuesday, Aug 04, 16:33:40 PDT (utime 1785886420.052391) args [serve,help(false),interactive(false),memory(_12996)]
+% Welcome to TerminusDB, version 12.0.6!
+% You can view your server in a browser at 'http://localhost:6364'
+
+[INFO] 2026-08-04T16:33:46.221249-07:00 GET /api/info (200)
